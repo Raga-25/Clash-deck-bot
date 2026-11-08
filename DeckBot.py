@@ -67,6 +67,16 @@ PENALITE_NIVEAU = 0.004            # estimation : -0,4 point par niveau manquant
 AGE_MAX_DEMANDE_H = 12             # on ignore les demandes plus vieilles que 12 h
 MAX_DEMANDES_PAR_PASSAGE = 5
 
+# Synergies entre paires de cartes (comptées pendant la collecte, calculées chaque semaine)
+FICHIER_PAIRES = "data_paires.json"
+FICHIER_SYNERGIES = "synergies.json"
+FENETRE_PAIRES_JOURS = 21          # les paires des 21 derniers jours comptent
+MIN_PARTIES_PAIRE = 150            # une paire doit avoir au moins 150 parties (tous modes) pour compter
+MIN_PARTIES_PAIRE_MODE = 40        # pour avoir sa propre valeur dans un mode
+LISSAGE_SYNERGIE = 300             # plus la paire a de parties, moins on la rapproche de zéro
+POIDS_SYNERGIE = 1.0               # poids de la synergie dans l'estimation d'un deck
+SEUIL_CITATION = 0.005             # une paire n'est citée que si elle pèse au moins 0,5 point
+
 CARTES_VICTOIRE = {
     "Hog Rider", "Royal Hogs", "Royal Giant", "Giant", "Goblin Giant", "Elixir Golem",
     "Golem", "Electro Giant", "Lava Hound", "Balloon", "Ram Rider", "Battle Ram",
@@ -247,7 +257,7 @@ def sauver_donnees(mode, data):
     os.replace(tmp, chemin)
 
 
-def collecter(mode, tags, data):
+def collecter(mode, tags, data, paires=None):
     """Ajoute les nouveaux combats des joueurs (stats par carte). Renvoie leur nombre."""
     types = MODES[mode]["types"]
 
@@ -286,10 +296,190 @@ def collecter(mode, tags, data):
                 e[0] += 1
                 e[1] += 1 if c1 > c2 else 0
                 data["cards"][str(c["id"])] = [c.get("name", "?"), c.get("elixirCost") or 0]
+            if paires is not None:
+                compter_paires(paires, jour, mode, sorted(c["id"] for c in cartes), c1 > c2)
             nouveaux += 1
         if plus_recent:
             data["last"][tag] = plus_recent
     return nouveaux
+
+
+def compter_paires(paires, jour, mode, ids, victoire):
+    """Ajoute un combat aux compteurs : cartes seules et 28 paires de cartes du deck."""
+    m = paires["days"].setdefault(jour, {}).setdefault(mode, {"b": 0, "w": 0, "c": {}, "p": {}})
+    v = 1 if victoire else 0
+    m["b"] += 1
+    m["w"] += v
+    for i, a in enumerate(ids):
+        e = m["c"].setdefault(str(a), [0, 0])
+        e[0] += 1
+        e[1] += v
+        for b in ids[i + 1:]:
+            e = m["p"].setdefault(f"{a}-{b}", [0, 0])
+            e[0] += 1
+            e[1] += v
+
+
+def charger_paires(strict=False):
+    chemin = os.path.join(DOSSIER, FICHIER_PAIRES)
+    vide = {"version": 1, "days": {}}
+    if not os.path.exists(chemin):
+        return vide
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"[ERREUR] Fichier illisible ({chemin}) : {e}", file=sys.stderr)
+        if strict:
+            sys.exit(1)
+        return vide
+    data.setdefault("days", {})
+    return data
+
+
+def sauver_paires(data):
+    chemin = os.path.join(DOSSIER, FICHIER_PAIRES)
+    tmp = chemin + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    os.replace(tmp, chemin)
+
+
+def nettoyer_paires(paires, aujourdhui):
+    """Supprime les jours trop anciens ; les paires vues une seule fois dans un jour déjà ancien sont allégées."""
+    limite = (aujourdhui - datetime.timedelta(days=FENETRE_PAIRES_JOURS)).strftime("%Y-%m-%d")
+    allege = (aujourdhui - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+    for jour in [j for j in paires["days"] if j < limite]:
+        del paires["days"][jour]
+    for jour, modes in paires["days"].items():
+        if jour >= allege:
+            continue
+        for m in modes.values():
+            m["p"] = {k: v for k, v in m["p"].items() if v[0] >= 2}
+
+
+def _somme(paires, modes):
+    """Additionne les jours de la fenêtre. Renvoie (combats, victoires, cartes, paires)."""
+    b = w = 0
+    cartes, duos = {}, {}
+    for jour in paires["days"].values():
+        for nom, m in jour.items():
+            if nom not in modes:
+                continue
+            b += m["b"]
+            w += m["w"]
+            for k, (g, v) in m["c"].items():
+                e = cartes.setdefault(k, [0, 0])
+                e[0] += g
+                e[1] += v
+            for k, (g, v) in m["p"].items():
+                e = duos.setdefault(k, [0, 0])
+                e[0] += g
+                e[1] += v
+    return b, w, cartes, duos
+
+
+def _lifts(b, w, cartes, duos, minimum):
+    """Écart brut de chaque paire : winrate réel de la paire moins ce que laissent attendre ses deux cartes."""
+    if b == 0:
+        return {}
+    p0 = w / b
+    res = {}
+    for k, (g, v) in duos.items():
+        if g < minimum:
+            continue
+        a, c = k.split("-")
+        ca, cc = cartes.get(a), cartes.get(c)
+        if not ca or not cc or ca[0] == 0 or cc[0] == 0:
+            continue
+        # winrate de chaque carte hors parties jouées avec l'autre (sinon la synergie se cache dans la moyenne)
+        ga, gc = ca[0] - g, cc[0] - g
+        if ga < 30 or gc < 30:
+            continue
+        attendu = (ca[1] - v) / ga + (cc[1] - v) / gc - p0
+        res[k] = (g, v / g - attendu)
+    return res
+
+
+def calculer_synergies(paires):
+    """Synergie de chaque paire fréquente : globale (tous modes) et propre à chaque mode.
+    La valeur de chaque mode est rapprochée de la valeur globale quand elle a peu de parties."""
+    tous = set(MODES)
+    b, w, cartes, duos = _somme(paires, tous)
+    glob = {}
+    for k, (g, brut) in _lifts(b, w, cartes, duos, MIN_PARTIES_PAIRE).items():
+        glob[k] = brut * g / (g + LISSAGE_SYNERGIE)
+    modes = {}
+    for nom in MODES:
+        bm, wm, cm, dm = _somme(paires, {nom})
+        res = {}
+        for k, (g, brut) in _lifts(bm, wm, cm, dm, MIN_PARTIES_PAIRE_MODE).items():
+            ref = glob.get(k, 0.0)
+            res[k] = round((brut * g + LISSAGE_SYNERGIE * ref) / (g + LISSAGE_SYNERGIE), 4)
+        modes[nom] = res
+    return {"version": 1, "ts": maintenant_utc().isoformat(), "fenetre_jours": FENETRE_PAIRES_JOURS,
+            "combats": b, "global": {k: round(v, 4) for k, v in glob.items()}, "modes": modes}
+
+
+def commande_synergies():
+    paires = charger_paires(strict=True)
+    syn = calculer_synergies(paires)
+    chemin = os.path.join(DOSSIER, FICHIER_SYNERGIES)
+    tmp = chemin + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(syn, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    os.replace(tmp, chemin)
+    print(f"Synergies : {syn['combats']} combats, {len(syn['global'])} paires globales, "
+          + ", ".join(f"{m} {len(v)}" for m, v in syn["modes"].items()))
+
+
+_SYN = {"data": None, "mode": None}
+
+
+def charger_synergies():
+    chemin = os.path.join(DOSSIER, FICHIER_SYNERGIES)
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def definir_synergies(mode):
+    _SYN["data"], _SYN["mode"] = charger_synergies(), mode
+
+
+def synergie_paire(a, b, syn, mode):
+    if not syn:
+        return 0.0
+    k = f"{min(a, b)}-{max(a, b)}"
+    v = (syn.get("modes") or {}).get(mode, {}).get(k)
+    return v if v is not None else (syn.get("global") or {}).get(k, 0.0)
+
+
+def bonus_synergie(ids, syn, mode):
+    """Effet des paires sur le winrate estimé du deck (même échelle qu'une moyenne de 8 cartes)."""
+    if not syn:
+        return 0.0
+    ids = list(ids)
+    total = sum(synergie_paire(ids[i], ids[j], syn, mode) for i in range(len(ids)) for j in range(i + 1, len(ids)))
+    return POIDS_SYNERGIE * total / len(ids)
+
+
+def lignes_synergie(ids, syn, mode, nom):
+    """Meilleure et pire paire du deck, si elles pèsent assez."""
+    if not syn:
+        return []
+    paires = sorted(((synergie_paire(ids[i], ids[j], syn, mode), ids[i], ids[j])
+                     for i in range(len(ids)) for j in range(i + 1, len(ids))), key=lambda x: x[0])
+    res = []
+    if paires and paires[-1][0] >= SEUIL_CITATION:
+        v, a, b = paires[-1]
+        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (`{100 * v:+.1f}` pt)")
+    if paires and paires[0][0] <= -SEUIL_CITATION:
+        v, a, b = paires[0]
+        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * v:+.1f}` pt)")
+    return res
 
 
 def nettoyer(data, mode, aujourdhui):
@@ -308,6 +498,7 @@ def collecte_tous_modes():
         print(f"[ERREUR] Variable(s) manquante(s) : {', '.join(manquants)}", file=sys.stderr)
         sys.exit(1)
     jour_semaine = aujourdhui_utc().weekday()
+    paires = charger_paires(strict=True)
     echecs = 0
     for mode in MODES:
         if mode == "gdc" and jour_semaine not in (0, 3, 4, 5, 6):   # la guerre va du jeudi au lundi
@@ -319,10 +510,12 @@ def collecte_tous_modes():
             echecs += 1
             continue
         data = charger_donnees(mode, strict=True)
-        n = collecter(mode, tags, data)
+        n = collecter(mode, tags, data, paires)
         nettoyer(data, mode, aujourdhui_utc())
         sauver_donnees(mode, data)
         print(f"{mode} : {len(tags)} joueurs lus, {n} nouveaux combats ({len(data['days'])} jours en mémoire)")
+    nettoyer_paires(paires, aujourdhui_utc())
+    sauver_paires(paires)
     if echecs == len(MODES):
         sys.exit(1)
 
@@ -373,7 +566,7 @@ def note_deck(ids, stats, p0, profil):
         wr = stats[i]["wr"] if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE else p0
         pen = PENALITE_NIVEAU * manque(profil[i]) if profil and i in profil else 0.0
         total += wr - pen
-    return total / len(ids)
+    return total / len(ids) + bonus_synergie(ids, _SYN["data"], _SYN["mode"])
 
 
 def elixir_moyen(ids, stats, profil):
@@ -660,6 +853,7 @@ def construire_reponse(mode, decks, tag, devine):
         return (f"Je n'ai trouvé que {combats} combats récents pour le mode **{nom_mode}** "
                 f"(il m'en faut au moins {MIN_COMBATS_MODE}).{precision}", None)
 
+    definir_synergies(mode)
     profil = None
     if tag:
         p = api_get(f"/players/{enc(tag)}")
@@ -699,6 +893,9 @@ def construire_reponse(mode, decks, tag, devine):
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
+    notes_syn = lignes_synergie(ids, _SYN["data"], mode, lambda i: nom_carte(i, False))
+    if notes_syn:
+        sections.append("**🔗 Synergies**\n" + "\n".join(notes_syn))
     if notes:
         sections.append("**⚠️ Points d'attention**\n" + "\n".join(f"• {n.capitalize()}" for n in notes))
     if changements:
@@ -901,8 +1098,10 @@ def main(argv):
         repondre()
     elif mode == "collect":
         collecte_tous_modes()
+    elif mode == "synergies":
+        commande_synergies()
     else:
-        print("[ERREUR] Mode inconnu. Utilise : repondre ou collect.", file=sys.stderr)
+        print("[ERREUR] Mode inconnu. Utilise : repondre, collect ou synergies.", file=sys.stderr)
         sys.exit(1)
 
 
