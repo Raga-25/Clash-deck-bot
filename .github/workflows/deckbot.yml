@@ -78,3 +78,16 @@ jobs:
             git pull --rebase
             git push
           fi
+
+      - name: Alerte en cas d'erreur
+        if: failure() && steps.tache.outputs.mode != 'repondre'
+        env:
+          WEBHOOK_LOGS: ${{ secrets.DISCORD_WEBHOOK_LOGS }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "$WEBHOOK_LOGS" ]; then
+            jq -n --arg t "❌ **$WORKFLOW** a échoué
+          $RUN_URL" '{username: "Alerte bots", content: $t}' \
+              | curl -sS -X POST -H "Content-Type: application/json" -d @- "$WEBHOOK_LOGS" || true
+          fi
