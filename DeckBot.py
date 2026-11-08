@@ -1,7 +1,7 @@
 """Bot d'analyse de deck : un joueur colle son deck dans un salon Discord, le bot répond avec une
 évaluation et des améliorations possibles.
 
-Utilisation dans le salon :
+Utilisation dans le salon (le « !deck » est facultatif : coller directement le lien suffit) :
     !deck gdc <lien du deck>        (guerre de clan)
     !deck classe <lien du deck>     (classé = Parcours des légendes)
     !deck voie <lien du deck>       (voie des trophées)
@@ -562,7 +562,7 @@ def construire_reponse(mode, ids, slots, tt, tag, devine):
     sections = [f"**{etiquette(score, p0)}** · winrate estimé `≈{100 * score:.1f}%` "
                 f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode}"
                 + (" · données lues en direct" if source == "direct" else "")
-                + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} »." if devine else ""),
+                + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
     if notes:
@@ -645,7 +645,9 @@ def repondre():
         if any(r.get("me") for r in m.get("reactions") or []):
             continue
         contenu = (m.get("content") or "").strip()
-        if not sans_accents(contenu).startswith("!deck"):
+        texte = sans_accents(contenu)
+        # Une demande : soit « !deck ... », soit directement un lien « Copier le deck » du jeu collé dans le salon
+        if not (texte.startswith("!deck") or re.search(r"copydeck\?deck=[\d;]+", texte)):
             continue
         try:
             age = (maintenant - datetime.datetime.fromisoformat(m["timestamp"])).total_seconds() / 3600
