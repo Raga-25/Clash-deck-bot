@@ -1,7 +1,7 @@
 """Bot d'analyse de deck : un joueur colle son deck dans un salon Discord, le bot répond avec une
 évaluation et des améliorations possibles.
 
-Utilisation dans le salon (le « !deck » est facultatif : coller directement le lien suffit) :
+Utilisation dans le salon (le « !deck » est facultatif : coller directement le lien suffit ; « !aide » affiche les consignes) :
     !deck gdc <lien du deck>        (guerre de clan)
     !deck classe <lien du deck>     (classé = Parcours des légendes)
     !deck voie <lien du deck>       (voie des trophées)
@@ -455,6 +455,24 @@ def etiquette(score, p0):
 # ========================
 # 🔹 Lecture de la demande
 # ========================
+CONSIGNES = """🔎 **ANALYSE DE DECK**
+
+1️⃣ Copie ton deck dans le jeu (bouton « Copier le deck »)
+2️⃣ Colle-le ici, avec le mode écrit avant le lien :
+• `gdc` = guerre de clan
+• `voie` = voie des trophées
+• rien = classé (par défaut)
+Exemple : `gdc` puis ton message copié
+3️⃣ Le bot répond sous ton message en 5-10 min. Un ✅ = demande prise en compte.
+
+📋 **Tu reçois** :
+• la note estimée du deck et le winrate de chaque carte
+• les points faibles
+• jusqu'à 2 cartes à remplacer (niveaux et élixir avant/après)
+• un lien pour copier le deck amélioré
+
+💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Un deck par message."""
+
 AIDE = ("Utilise : `!deck <mode> <lien du deck>`\n"
         "Modes : `gdc` (guerre), `classe` (Parcours des légendes), `voie` (voie des trophées).\n"
         "Le lien s'obtient dans le jeu avec « Copier le deck ».")
@@ -582,7 +600,8 @@ def construire_reponse(mode, ids, slots, tt, tag, devine):
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
     sections.append("-# Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : "
                     "un conseil, pas une garantie.")
-    embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": "\n\n".join(sections)[:4000], "color": 3447003}
+    embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": "\n\n".join(sections)[:4000], "color": 3447003,
+             "footer": {"text": "Autre deck ? Colle le lien (écris gdc, voie ou classe avant) · !aide pour les consignes"}}
     return None, embed
 
 
@@ -646,6 +665,18 @@ def repondre():
             continue
         contenu = (m.get("content") or "").strip()
         texte = sans_accents(contenu)
+        if texte.startswith(("!aide", "!help")):
+            if traites >= MAX_DEMANDES_PAR_PASSAGE:
+                break
+            traites += 1
+            code, _ = discord("PUT", f"/channels/{CHANNEL_ID}/messages/{m['id']}/reactions/{COCHE}/@me")
+            if code in (200, 204):
+                code, _ = discord("POST", f"/channels/{CHANNEL_ID}/messages",
+                                  json={"content": CONSIGNES, "message_reference": {"message_id": m["id"], "fail_if_not_exists": False},
+                                        "allowed_mentions": {"parse": [], "replied_user": False}})
+                if code not in (200, 201):
+                    discord("DELETE", f"/channels/{CHANNEL_ID}/messages/{m['id']}/reactions/{COCHE}/@me")
+            continue
         # Une demande : soit « !deck ... », soit directement un lien « Copier le deck » du jeu collé dans le salon
         if not (texte.startswith("!deck") or re.search(r"copydeck\?deck=[\d;]+", texte)):
             continue
