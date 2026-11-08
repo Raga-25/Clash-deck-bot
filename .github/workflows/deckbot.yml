@@ -3,15 +3,17 @@ name: Bot analyse de deck
 on:
   schedule:
     - cron: '*/5 * * * *'    # toutes les 5 minutes : lit le salon et répond aux demandes
-    - cron: '20 */6 * * *'   # toutes les 6 heures : enregistre les stats des cartes
+    - cron: '20 */6 * * *'   # toutes les 6 heures : enregistre les stats des cartes et des paires de cartes
+    - cron: '50 5 * * 1'     # lundi 5h50 UTC : calcule les synergies (synergies.json)
   workflow_dispatch:
     inputs:
       mode:
-        description: "repondre = lire le salon et répondre | collect = enregistrer les stats des cartes"
+        description: "repondre = lire le salon et répondre | collect = enregistrer les stats | synergies = recalculer synergies.json"
         type: choice
         options:
           - repondre
           - collect
+          - synergies
         default: repondre
 
 # Autorise le workflow à enregistrer les fichiers de données dans le dépôt
@@ -50,6 +52,8 @@ jobs:
             echo "mode=$MODE_MANUEL" >> "$GITHUB_OUTPUT"
           elif [ "$SCHEDULE" = "20 */6 * * *" ]; then
             echo "mode=collect" >> "$GITHUB_OUTPUT"
+          elif [ "$SCHEDULE" = "50 5 * * 1" ]; then
+            echo "mode=synergies" >> "$GITHUB_OUTPUT"
           else
             echo "mode=repondre" >> "$GITHUB_OUTPUT"
           fi
@@ -62,13 +66,13 @@ jobs:
         run: python DeckBot.py "${{ steps.tache.outputs.mode }}"
 
       - name: Sauvegarde des données
-        if: always() && steps.tache.outputs.mode == 'collect'
+        if: always() && (steps.tache.outputs.mode == 'collect' || steps.tache.outputs.mode == 'synergies')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data_gdc.json data_classe.json data_voie.json 2>/dev/null || true
+          git add data_gdc.json data_classe.json data_voie.json data_paires.json synergies.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            git commit -m "Données des cartes"
+            git commit -m "Données des cartes et synergies"
             git pull --rebase
             git push
           fi
