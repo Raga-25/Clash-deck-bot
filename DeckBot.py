@@ -554,7 +554,7 @@ CONSIGNES = """🔎 **ANALYSE DE DECK**
 Exemple : `gdc` puis ton message copié
 3️⃣ Le bot répond sous ton message en 5-10 min. Un ✅ = demande prise en compte.
 
-⚔️ **En guerre** : colle seulement le deck à améliorer (`gdc` avant). Le bot retrouve tes 3 autres decks de guerre grâce à ton tag (dans la limite de tes derniers combats) et n'utilise aucune de leurs cartes. S'il ne les trouve pas, colle les 4 decks dans le même message.
+⚔️ **En guerre** : colle le ou les decks à améliorer (`gdc` avant). Le bot retrouve tes autres decks de guerre grâce à ton tag et n'utilise aucune de leurs cartes. Si tu veux tout contrôler, colle les 4 decks dans le même message.
 
 📋 **Tu reçois** :
 • la note estimée du deck et le winrate de chaque carte
@@ -562,7 +562,7 @@ Exemple : `gdc` puis ton message copié
 • jusqu'à 2 cartes à remplacer (niveaux et élixir avant/après)
 • un lien pour copier le deck amélioré
 
-💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Un deck par message."""
+💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Un deck par message (jusqu'à 4 en guerre)."""
 
 AIDE = ("Utilise : `!deck <mode> <lien du deck>`\n"
         "Modes : `gdc` (guerre), `classe` (Parcours des légendes), `voie` (voie des trophées).\n"
