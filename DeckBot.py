@@ -498,14 +498,39 @@ def lien_deck(ids, slots, tt):
 # ========================
 # 🔹 Réponse
 # ========================
+_CACHE_DIRECT = {}
+
+
+def donnees_du_mode(mode):
+    """Données stockées si elles suffisent, sinon lecture en direct chez les meilleurs joueurs.
+    Renvoie (data, source) ; data vaut None si le classement est introuvable."""
+    data = charger_donnees(mode)
+    if sum(j["b"] for j in data["days"].values()) >= MIN_COMBATS_MODE:
+        return data, "stockees"
+    if mode not in _CACHE_DIRECT:
+        tags = joueurs_a_lire(mode)
+        if not tags:
+            _CACHE_DIRECT[mode] = (None, "introuvable")
+        else:
+            direct = {"version": 1, "last": {}, "cards": {}, "days": {}}
+            collecter(mode, tags, direct)
+            _CACHE_DIRECT[mode] = (direct, "direct")
+    return _CACHE_DIRECT[mode]
+
+
 def construire_reponse(mode, ids, slots, tt, tag, devine):
     """Renvoie (texte_simple, embed)."""
-    data = charger_donnees(mode)
-    stats, p0, combats = stats_cartes(data)
     nom_mode = MODES[mode]["nom"]
+    data, source = donnees_du_mode(mode)
+    if data is None:
+        return (f"Je n'arrive pas à récupérer les meilleurs joueurs du mode **{nom_mode}** pour le moment. "
+                "Réessaie un peu plus tard.", None)
+    stats, p0, combats = stats_cartes(data)
     if combats < MIN_COMBATS_MODE:
-        return (f"Je n'ai pas encore assez de données pour le mode **{nom_mode}** "
-                f"({combats} combats enregistrés, il m'en faut au moins {MIN_COMBATS_MODE}). Réessaie dans quelques jours.", None)
+        precision = (" Les combats de guerre ne restent que peu de temps dans l'historique des joueurs : "
+                     "réessaie pendant la guerre (du jeudi au lundi)." if mode == "gdc" else "")
+        return (f"Je n'ai trouvé que {combats} combats récents pour le mode **{nom_mode}** "
+                f"(il m'en faut au moins {MIN_COMBATS_MODE}).{precision}", None)
 
     profil = None
     if tag:
@@ -536,6 +561,7 @@ def construire_reponse(mode, ids, slots, tt, tag, devine):
             lignes.append(f"{nom_carte(i)}{' ✨' if evo[pos] else ''} — peu de données")
     sections = [f"**{etiquette(score, p0)}** · winrate estimé `≈{100 * score:.1f}%` "
                 f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode}"
+                + (" · données lues en direct" if source == "direct" else "")
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} »." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
