@@ -385,14 +385,14 @@ def elixir_moyen(ids, stats, profil):
     return sum(couts) / len(couts) if couts else 0.0
 
 
-def ameliorer(ids, evo, stats, p0, profil):
+def ameliorer(ids, evo, stats, p0, profil, exclues=()):
     """Remplacements proposés : renvoie (nouveau_deck, [(sortant, entrant)])."""
     cartes = list(ids)
     if profil:
         pool = {i for i, c in profil.items() if i not in cartes and manque(c) <= MAX_NIVEAUX_MANQUANTS}
     else:
         pool = set(stats)
-    pool = {i for i in pool if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE}
+    pool = {i for i in pool if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE and i not in exclues}
     changements = []
     while len(changements) < NB_CHANGEMENTS:
         base = note_deck(cartes, stats, p0, profil)
@@ -416,6 +416,95 @@ def ameliorer(ids, evo, stats, p0, profil):
         pool.discard(entrant)
         changements.append((sortant, entrant))
     return cartes, changements
+
+
+def optimiser_ensemble(decks_ids, evos, stats, p0, profil):
+    """Améliore plusieurs decks de guerre à la fois, sans aucune carte en commun entre eux.
+
+    Une carte déjà présente dans un des 4 decks ne peut pas être proposée dans un autre : les remplaçantes viennent
+    uniquement des cartes libres. Les doublons de départ sont corrigés en priorité (ils pèsent plus lourd que tout gain).
+    Renvoie (decks, changements) ; changement = (numéro_deck, carte_sortante, carte_entrante, None)."""
+    decks = [list(d) for d in decks_ids]
+    n = len(decks)
+
+    def doublons(ds):
+        tous = [c for d in ds for c in d]
+        return len(tous) - len(set(tous))
+
+    def objectif(ds):
+        return sum(note_deck(d, stats, p0, profil) for d in ds) - 1.0 * doublons(ds)
+
+    def compatibles(x, y):
+        if x not in stats or y not in stats:
+            return False
+        if role(stats[x]["name"]) != role(stats[y]["name"]):
+            return False
+        return abs((stats[x]["elixir"] or 0) - (stats[y]["elixir"] or 0)) <= 1
+
+    utilisees = {c for d in decks for c in d}
+    if profil:
+        pool = {i for i, c in profil.items() if i not in utilisees and manque(c) <= MAX_NIVEAUX_MANQUANTS}
+    else:
+        pool = set(stats) - utilisees
+    pool = {i for i in pool if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE}
+    limite = NB_CHANGEMENTS + (2 if doublons(decks) else 0)
+    nb = [0] * n
+    changements = []
+    for _ in range(4 * n):
+        courant = objectif(decks)
+        meilleur = None
+        for k in range(n):
+            for pos in range(8):
+                x = decks[k][pos]
+                if evos[k][pos]:
+                    continue
+                if nb[k] < limite:
+                    for y in pool:
+                        if not compatibles(x, y):
+                            continue
+                        decks[k][pos] = y
+                        gain = objectif(decks) - courant
+                        decks[k][pos] = x
+                        if gain >= GAIN_MINIMUM and (meilleur is None or gain > meilleur[0]):
+                            meilleur = (gain, "remplace", k, pos, y, None, None)
+        if not meilleur:
+            break
+        _, genre, k, pos, y, _j, _pos2 = meilleur
+        x = decks[k][pos]
+        decks[k][pos] = y
+        pool.discard(y)
+        nb[k] += 1
+        changements.append((k, x, y, None))
+    return decks, changements
+
+
+def autres_decks_guerre(tag, decks_colles, combien):
+    """Retrouve les autres decks de guerre du joueur dans ses combats récents (l'API ne garde que 25 combats).
+    On ne garde que des decks sans carte commune avec les decks collés ni entre eux."""
+    if not tag or combien <= 0:
+        return []
+    combats = api_get(f"/players/{enc(tag)}/battlelog") or []
+    vus = {}
+    for rang, b in enumerate(combats):                      # du plus récent au plus ancien
+        if b.get("type") not in MODES["gdc"]["types"]:
+            continue
+        eq = (b.get("team") or [None])[0]
+        cartes = (eq or {}).get("cards") or []
+        ids = [c["id"] for c in cartes]
+        if len(ids) != 8 or len(set(ids)) != 8:
+            continue
+        e = vus.setdefault(tuple(sorted(ids)), {"ids": ids, "n": 0, "rang": rang})
+        e["n"] += 1
+    interdites = {c for d in decks_colles for c in d}
+    choisis = []
+    for e in sorted(vus.values(), key=lambda e: (-e["n"], e["rang"])):
+        if interdites & set(e["ids"]):
+            continue
+        choisis.append(e["ids"])
+        interdites |= set(e["ids"])
+        if len(choisis) == combien:
+            break
+    return choisis
 
 
 def points_attention(ids, stats, profil):
@@ -465,6 +554,8 @@ CONSIGNES = """🔎 **ANALYSE DE DECK**
 Exemple : `gdc` puis ton message copié
 3️⃣ Le bot répond sous ton message en 5-10 min. Un ✅ = demande prise en compte.
 
+⚔️ **En guerre** : colle seulement le deck à améliorer (`gdc` avant). Le bot retrouve tes 3 autres decks de guerre grâce à ton tag (dans la limite de tes derniers combats) et n'utilise aucune de leurs cartes. S'il ne les trouve pas, colle les 4 decks dans le même message.
+
 📋 **Tu reçois** :
 • la note estimée du deck et le winrate de chaque carte
 • les points faibles
@@ -478,15 +569,40 @@ AIDE = ("Utilise : `!deck <mode> <lien du deck>`\n"
         "Le lien s'obtient dans le jeu avec « Copier le deck ».")
 
 
-def lire_demande(contenu):
-    """Renvoie (mode, ids, slots, tt, tag, mode_devine) ou lève ValueError avec un message."""
-    texte = sans_accents(contenu)
-    m_deck = re.search(r"deck=([\d;]+)", texte)
+def lire_un_lien(url):
+    """Lit un lien « Copier le deck » : renvoie (ids, slots, tt, tag) ou None."""
+    m_deck = re.search(r"deck=([\d;]+)", url)
     if not m_deck:
-        raise ValueError("Je ne trouve pas de deck dans ton message. " + AIDE)
+        return None
     ids = [int(x) for x in m_deck.group(1).split(";") if x]
-    if len(ids) != 8 or len(set(ids)) != 8:
-        raise ValueError("Le lien doit contenir 8 cartes différentes. " + AIDE)
+    m_slots = re.search(r"slots=([\d;]+)", url)
+    slots = [int(x) for x in m_slots.group(1).split(";") if x] if m_slots else []
+    if len(slots) != 8:
+        slots = [0] * 8
+    m_tt = re.search(r"tt=(\d+)", url)
+    m_id = re.search(r"[?&]id=([0-9a-z]+)", url)
+    return ids, slots, int(m_tt.group(1)) if m_tt else None, ("#" + m_id.group(1).upper()) if m_id else None
+
+
+def lire_demande(contenu):
+    """Renvoie (mode, decks, tag, mode_devine) ; decks = liste de (ids, slots, tt). Lève ValueError avec un message."""
+    texte = sans_accents(contenu)
+    liens = re.findall(r"https?://\S+", texte) or [texte]
+    decks, tag, vus = [], None, set()
+    for lien in liens:
+        lu = lire_un_lien(lien)
+        if not lu:
+            continue
+        ids, slots, tt, t = lu
+        if len(ids) != 8 or len(set(ids)) != 8:
+            raise ValueError("Chaque lien doit contenir 8 cartes différentes. " + AIDE)
+        if tuple(ids) in vus:
+            continue
+        vus.add(tuple(ids))
+        decks.append((ids, slots, tt))
+        tag = tag or t
+    if not decks:
+        raise ValueError("Je ne trouve pas de deck dans ton message. " + AIDE)
     avant_lien = re.sub(r"https?://\S+", " ", texte)
     mode, devine = None, False
     for mot in re.findall(r"[a-z]+", avant_lien.replace("!deck", " ")):
@@ -495,14 +611,7 @@ def lire_demande(contenu):
             break
     if mode is None:
         mode, devine = MODE_PAR_DEFAUT, True
-    m_slots = re.search(r"slots=([\d;]+)", texte)
-    slots = [int(x) for x in m_slots.group(1).split(";") if x] if m_slots else []
-    if len(slots) != 8:
-        slots = [0] * 8
-    m_tt = re.search(r"tt=(\d+)", texte)
-    m_id = re.search(r"[?&]id=([0-9a-z]+)", texte)
-    tag = "#" + m_id.group(1).upper() if m_id else None
-    return mode, ids, slots, int(m_tt.group(1)) if m_tt else None, tag, devine
+    return mode, decks[:4], tag, devine
 
 
 def lien_deck(ids, slots, tt):
@@ -536,8 +645,9 @@ def donnees_du_mode(mode):
     return _CACHE_DIRECT[mode]
 
 
-def construire_reponse(mode, ids, slots, tt, tag, devine):
+def construire_reponse(mode, decks, tag, devine):
     """Renvoie (texte_simple, embed)."""
+    ids, slots, tt = decks[0]
     nom_mode = MODES[mode]["nom"]
     data, source = donnees_du_mode(mode)
     if data is None:
@@ -555,13 +665,19 @@ def construire_reponse(mode, ids, slots, tt, tag, devine):
         p = api_get(f"/players/{enc(tag)}")
         if p and p.get("cards"):
             profil = {c["id"]: c for c in p["cards"]}
-            if not all(i in profil for i in ids):
+            if not all(i in profil for d in decks for i in d[0]):
                 profil = None
+    autres = []
+    if mode == "gdc" and tag:
+        autres = autres_decks_guerre(tag, [d[0] for d in decks], 4 - len(decks))
+    if mode == "gdc" and len(decks) >= 2:
+        return None, construire_embed_gdc(decks, autres, stats, p0, combats, profil, source)
+    exclues = {c for a in autres for c in a}
     evo = [s > 0 for s in slots]
 
     score = note_deck(ids, stats, p0, profil)
     el_avant = elixir_moyen(ids, stats, profil)
-    nouveau, changements = ameliorer(ids, evo, stats, p0, profil)
+    nouveau, changements = ameliorer(ids, evo, stats, p0, profil, exclues)
     score_apres = note_deck(nouveau, stats, p0, profil)
 
     def nom_carte(i, avec_niveau=True):
@@ -598,11 +714,72 @@ def construire_reponse(mode, ids, slots, tt, tag, devine):
                         + ("" if profil else "\n-# Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
     else:
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
+    if mode == "gdc":
+        if autres:
+            sections.append("**🛡️ Tes autres decks de guerre** (retrouvés dans ton historique, je n'utilise aucune de leurs cartes)\n"
+                            + "\n".join(f"Deck {chr(66 + k)} : " + ", ".join(nom_carte(i, False) for i in a) for k, a in enumerate(autres)))
+        if len(autres) < 3:
+            sections.append(f"-# 💡 Je n'ai retrouvé que {len(autres)} autre{'s' if len(autres) > 1 else ''} deck{'s' if len(autres) > 1 else ''} de guerre dans ton historique "
+                            "(l'API ne garde que tes 25 derniers combats). Pour être sûr qu'aucune carte n'est en commun, colle tes 4 decks dans le même message.")
+    elif len(decks) > 1:
+        sections.append("-# Plusieurs decks collés : seul le premier est analysé dans ce mode.")
     sections.append("-# Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : "
                     "un conseil, pas une garantie.")
     embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": "\n\n".join(sections)[:4000], "color": 3447003,
              "footer": {"text": "Autre deck ? Colle le lien (écris gdc, voie ou classe avant) · !aide pour les consignes"}}
     return None, embed
+
+
+def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source):
+    """Analyse de plusieurs decks de guerre à la fois, sans carte commune.
+    `autres` : decks retrouvés dans l'historique du joueur, qui ne sont pas modifiés (seules leurs cartes sont protégées)."""
+    nb = len(decks)
+    ids_liste = [d[0] for d in decks] + list(autres)
+    evos = [[s > 0 for s in d[1]] for d in decks] + [[True] * 8 for _ in autres]
+    tous = [c for ids in ids_liste for c in ids]
+    doublons = sorted({c for c in tous if tous.count(c) > 1})
+    tous_nouveaux, changements = optimiser_ensemble(ids_liste, evos, stats, p0, profil)
+    nouveaux = tous_nouveaux[:nb]
+    ids_liste_modif = ids_liste[:nb]
+    avant = sum(note_deck(i, stats, p0, profil) for i in ids_liste_modif) / nb
+    apres = sum(note_deck(i, stats, p0, profil) for i in nouveaux) / nb
+
+    def nom(i):
+        n = nom_fr(stats[i]["name"]) if i in stats else f"carte {i}"
+        if profil and i in profil:
+            n += f" (niv. {niveau_jeu(profil[i])}/16)"
+        return n
+
+    entete = (f"**{etiquette(avant, p0)}** · moyenne estimée de tes {nb} decks `≈{100 * avant:.1f}%` → "
+              f"`≈{100 * apres:.1f}%` (moyenne du mode : `{100 * p0:.1f}%`)\n"
+              f"-# {combats} combats analysés · Guerre de clan" + (" · données lues en direct" if source == "direct" else ""))
+    if doublons:
+        entete += ("\n⚠️ Cartes présentes dans plusieurs decks : " + ", ".join(nom_fr(stats[c]["name"]) if c in stats else str(c) for c in doublons)
+                   + " (corrigé ci-dessous)")
+    sections = [entete]
+    for k, deck in enumerate(nouveaux):
+        slots = [decks[k][1][p] if deck[p] == ids_liste[k][p] else 0 for p in range(8)]
+        lignes = []
+        for kk, sortant, entrant, origine in changements:
+            if kk != k:
+                continue
+            lignes.append(f"🔁 {nom(sortant)} → **{nom(entrant)}**")
+        el_av = elixir_moyen(ids_liste[k], stats, profil)
+        el_ap = elixir_moyen(deck, stats, profil)
+        note_av, note_ap = note_deck(ids_liste[k], stats, p0, profil), note_deck(deck, stats, p0, profil)
+        bloc = f"**Deck {k + 1}** · `≈{100 * note_av:.1f}%` → `≈{100 * note_ap:.1f}%` · ⚡ `{el_av:.1f}` → `{el_ap:.1f}`\n"
+        bloc += "\n".join(lignes) if lignes else "✅ inchangé"
+        bloc += f"\n[📥 Copier le deck {k + 1}]({lien_deck(deck, slots, decks[k][2])})"
+        sections.append(bloc)
+    if autres:
+        sections.append("**🛡️ Decks retrouvés dans ton historique** (non modifiés)\n"
+                        + "\n".join(f"Deck {nb + k + 1} : " + ", ".join(nom_fr(stats[i]["name"]) if i in stats else str(i) for i in a) for k, a in enumerate(autres)))
+    toutes = [c for d in tous_nouveaux for c in d]
+    sections.append(f"-# Les {len(tous_nouveaux)} decks n'ont aucune carte en commun ({len(set(toutes))} cartes différentes). "
+                    "Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : un conseil, pas une garantie."
+                    + ("" if profil else " Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
+    return {"title": "🔎 Analyse de tes decks de guerre", "description": "\n\n".join(sections)[:4000], "color": 3447003,
+            "footer": {"text": "Autre analyse ? Colle tes 4 liens (écris gdc avant) · !aide pour les consignes"}}
 
 
 # ========================
