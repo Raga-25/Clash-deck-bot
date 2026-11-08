@@ -215,8 +215,13 @@ def joueurs_a_lire(mode):
                    f"/locations/{LOCALISATION_FRANCE}/pathoflegend/players",
                    f"/locations/global/pathoflegend/{m2:%Y-%m}/rankings/players"]
     else:
-        chemins = ["/locations/global/rankings/players", f"/locations/{LOCALISATION_FRANCE}/rankings/players"]
+        # classements par trophées ; s'ils sont indisponibles, on prend les meilleurs du Parcours des légendes
+        m1 = maintenant_utc().replace(day=1) - datetime.timedelta(days=1)
+        chemins = ["/locations/global/rankings/players", f"/locations/{LOCALISATION_FRANCE}/rankings/players",
+                   f"/locations/global/pathoflegend/{m1:%Y-%m}/rankings/players",
+                   f"/locations/{LOCALISATION_FRANCE}/pathoflegend/players"]
     for chemin in chemins:
+        print(f"[{mode}] essai du classement {chemin}", file=sys.stderr)
         data = api_get(chemin, {"limit": NB_JOUEURS})
         items = (data or {}).get("items") or []
         if items:
