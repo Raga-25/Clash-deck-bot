@@ -1,0 +1,36 @@
+name: Coach personnel
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # toutes les 10 minutes : lit le salon du coach et répond (GitHub peut retarder)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coach
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installation des dépendances
+        run: pip install requests
+
+      - name: Coach
+        env:
+          CR_API_KEY: ${{ secrets.CR_API_KEY }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_COACH }}
+        run: python Coach.py repondre
