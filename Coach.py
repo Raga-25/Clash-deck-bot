@@ -9,8 +9,11 @@ Il réutilise DeckBot.py (même dépôt). Variables d'environnement :
   CR_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID (= le salon du coach, pas celui de DeckBot)
 Lancement : python Coach.py repondre
 """
+import os
 import re
 import sys
+import json
+import math
 import time
 import datetime
 from zoneinfo import ZoneInfo
@@ -248,6 +251,113 @@ def cartes_a_monter(deck, profil, stats, p0):
     return sorted(res, reverse=True)[:3]
 
 
+
+# ========================
+# 🔹 Analyses supplémentaires
+# ========================
+def niveau_cartes(cartes):
+    """Niveau moyen (échelle /16) des cartes d'un deck lu dans un combat."""
+    niv = [c["level"] + 16 - c["maxLevel"] for c in cartes if c.get("level") is not None and c.get("maxLevel")]
+    return sum(niv) / len(niv) if len(niv) == len(cartes) else None
+
+
+def ecart_niveaux(combats):
+    """Écart de niveau moyen (toi - adversaire) et résultats selon cet écart."""
+    lignes = []
+    for c in combats:
+        if not (c["win"] or c["loss"]):
+            continue
+        a, b = niveau_cartes(c["mes"]), niveau_cartes(c["adv"])
+        if a is not None and b is not None:
+            lignes.append((a - b, c["win"]))
+    if len(lignes) < 8:
+        return None
+    if all(abs(e) < 0.05 for e, _ in lignes):
+        return {"egalises": True}
+    groupes = {"sous": [0, 0], "egal": [0, 0], "sur": [0, 0]}
+    for e, w in lignes:
+        g = groupes["sous" if e <= -0.5 else ("sur" if e >= 0.5 else "egal")]
+        g[0] += 1
+        g[1] += w
+    return {"egalises": False, "moy": sum(e for e, _ in lignes) / len(lignes), "groupes": groupes}
+
+
+def facon_de_perdre(combats):
+    defaites = [c for c in combats if c["loss"]]
+    if len(defaites) < 4:
+        return None
+    de_peu = sum(1 for c in defaites if c["c2"] - c["c1"] == 1)
+    nettes = sum(1 for c in defaites if c["c2"] - c["c1"] >= 2)
+    sans_couronne = sum(1 for c in defaites if c["c1"] == 0)
+    return {"n": len(defaites), "de_peu": de_peu, "nettes": nettes, "zero": sans_couronne}
+
+
+def sessions(combats):
+    """Numéro de chaque combat dans sa session de jeu (nouvelle session après 30 minutes sans jouer)."""
+    res, pos, prec = [], 0, None
+    for c in combats:
+        if prec is None or (c["t"] - prec).total_seconds() > 30 * 60:
+            pos = 0
+        pos += 1
+        prec = c["t"]
+        res.append((pos, c))
+    return res
+
+
+def fatigue(combats):
+    debut, fin = [0, 0], [0, 0]
+    for pos, c in sessions(combats):
+        if not (c["win"] or c["loss"]):
+            continue
+        cible = debut if pos <= 3 else (fin if pos >= 6 else None)
+        if cible is not None:
+            cible[0] += 1
+            cible[1] += c["win"]
+    if debut[0] < 5 or fin[0] < 5:
+        return None
+    return debut, fin
+
+
+def elixir_moyen_cartes(cartes):
+    v = [c["elixirCost"] for c in cartes if c.get("elixirCost") is not None]
+    return sum(v) / len(v) if len(v) >= 7 else None
+
+
+def vitesse_adverse(combats):
+    """Résultats selon la vitesse du deck adverse (élixir moyen)."""
+    seaux = {"rapides (≤ 3,2)": [0, 0], "moyens (3,3 à 3,9)": [0, 0], "lourds (≥ 4,0)": [0, 0]}
+    for c in combats:
+        if not (c["win"] or c["loss"]):
+            continue
+        m = elixir_moyen_cartes(c["adv"])
+        if m is None:
+            continue
+        k = "rapides (≤ 3,2)" if m <= 3.2 else ("lourds (≥ 4,0)" if m >= 4.0 else "moyens (3,3 à 3,9)")
+        seaux[k][0] += 1
+        seaux[k][1] += c["win"]
+    return {k: v for k, v in seaux.items() if v[0] >= 3}
+
+
+def forme(profil_brut, b):
+    v, d_ = profil_brut.get("wins"), profil_brut.get("losses")
+    termines = b["v"] + b["l"]
+    if not v or d_ is None or termines < 8 or v + d_ < 200:
+        return None
+    globale = v / (v + d_)
+    recente = b["v"] / termines
+    return globale, recente
+
+
+def parcours_legendes(profil_brut, combats):
+    cur = profil_brut.get("currentPathOfLegendSeasonResult") or {}
+    meilleur = profil_brut.get("bestPathOfLegendSeasonResult") or {}
+    gains = [c["trophees"] for c in combats if c["mode"] == "classe" and c["trophees"] is not None]
+    if not cur and len(gains) < 6:
+        return None
+    return {"cur": cur, "meilleur": meilleur, "gains": gains}
+
+
+
 # ========================
 # 🔹 Construction de la réponse
 # ========================
@@ -268,10 +378,11 @@ def construire(tag):
     el = elixir(combats)
     mo = moments(combats)
     ti = tilt(combats)
+    fa = fatigue(combats)
     priorites = []
-
-    # --- Bilan
     termines = b["v"] + b["l"]
+
+    # ===== Embed 1 : bilan, forme, parcours =====
     lignes = [f"**{b['v']}V – {b['l']}D** sur {b['n']} combats (`{pct(b['v'], termines)}` de victoires) · "
               f"3 couronnes : {b['trois']} gagnées, {b['subi']} subies"]
     if b["serie"] >= 3 and b["sens"] in ("V", "D"):
@@ -281,9 +392,76 @@ def construire(tag):
     noms_modes = {"classe": "Classé", "voie": "Voie des trophées", "gdc": "Guerre", "autre": "Autres"}
     detail = " · ".join(f"{noms_modes.get(m, m)} {w}/{g}" for m, (g, w) in sorted(b["par_mode"].items(), key=lambda x: -x[1][0]))
     lignes.append(f"-# Victoires / combats par mode : {detail}")
-    sections = ["**📊 Bilan**\n" + "\n".join(lignes)]
+    sections1 = ["**📊 Bilan**\n" + "\n".join(lignes)]
 
-    # --- Bêtes noires
+    fo = forme(profil_brut, b)
+    if fo:
+        glob, rec = fo
+        txt = f"Ces derniers combats : `{100 * rec:.0f}%` de victoires · sur toute ta carrière : `{100 * glob:.0f}%`"
+        if rec - glob >= 0.08:
+            txt += "\n🔥 Tu es en forme : au-dessus de ta moyenne habituelle."
+        elif glob - rec >= 0.08:
+            txt += "\n📉 Tu es en dessous de ta moyenne habituelle : change peut-être une carte, ou fais une pause."
+        sections1.append("**📈 Ta forme du moment**\n" + txt)
+
+    pl = parcours_legendes(profil_brut, combats)
+    if pl:
+        txt = []
+        cur, best, gains = pl["cur"], pl["meilleur"], pl["gains"]
+        if cur:
+            morceaux = []
+            if cur.get("leagueNumber") is not None:
+                morceaux.append(f"ligue {cur['leagueNumber']}")
+            if cur.get("trophies") is not None:
+                morceaux.append(f"{cur['trophies']} trophées")
+            if cur.get("rank"):
+                morceaux.append(f"rang mondial {cur['rank']}")
+            if morceaux:
+                txt.append("Cette saison : " + " · ".join(morceaux))
+        if best and best.get("trophies") is not None and best.get("leagueNumber") is not None:
+            txt.append(f"Ton meilleur résultat de saison : ligue {best['leagueNumber']}, {best['trophies']} trophées")
+        if len(gains) >= 6:
+            net = sum(gains)
+            moy = net / len(gains)
+            txt.append(f"Sur tes {len(gains)} derniers combats classés : `{net:+d}` trophées (`{moy:+.1f}` par combat). "
+                       f"À ce rythme, 20 combats de plus = `{20 * moy:+.0f}`.")
+        if txt:
+            sections1.append("**🏆 Parcours des légendes**\n" + "\n".join(txt))
+    embed1 = {"title": f"🧠 Coach de {nom}", "color": 15105570, "description": ("\n\n".join(sections1))[:4000],
+              "footer": {"text": f"Basé sur tes {b['n']} derniers combats (limite de l'API) : indicatif, pas une vérité absolue"}}
+    embeds = [embed1]
+
+    # ===== Embed 2 : comment tu joues =====
+    sections2 = []
+    # niveaux
+    en = ecart_niveaux(combats)
+    if en:
+        if en["egalises"]:
+            sections2.append("**⚖️ Niveaux des cartes**\nLes niveaux étaient identiques dans tous tes combats (mode à niveaux égalisés) : "
+                             "tes résultats ne dépendent pas de tes niveaux ici.")
+        else:
+            g = en["groupes"]
+            noms_g = {"sous": "en dessous de l'adversaire", "egal": "à niveau égal", "sur": "au-dessus de l'adversaire"}
+            lg = [f"• {noms_g[k]} : {v[1]}/{v[0]} (`{pct(v[1], v[0])}`)" for k, v in g.items() if v[0] >= 2]
+            txt = f"Écart moyen avec tes adversaires : `{en['moy']:+.1f}` niveau\n" + "\n".join(lg)
+            sous, egal_sur = g["sous"], [g["egal"][0] + g["sur"][0], g["egal"][1] + g["sur"][1]]
+            if sous[0] >= 3 and egal_sur[0] >= 3 and sous[1] / sous[0] + 0.2 <= egal_sur[1] / egal_sur[0]:
+                txt += "\n⚠️ Tu perds surtout quand tes cartes sont moins hautes que celles de l'adversaire."
+                priorites.append("**Niveaux** : tes défaites viennent surtout des combats où tu es sous-niveau : monte tes cartes avant de changer de deck.")
+            sections2.append("**⚖️ Niveaux des cartes**\n" + txt)
+    # façon de perdre
+    fp = facon_de_perdre(combats)
+    if fp:
+        txt = (f"Sur tes {fp['n']} défaites : {fp['de_peu']} de peu (1 couronne d'écart), {fp['nettes']} nettes (2 couronnes ou plus), "
+               f"{fp['zero']} sans marquer de couronne")
+        if fp["de_peu"] / fp["n"] >= 0.5:
+            txt += "\n⚠️ La moitié de tes défaites se jouent à une couronne : ce sont des matchs gagnables."
+            priorites.append("**Matchs serrés** : tu perds souvent d'une seule couronne. Garde un sort et un peu d'élixir pour la fin du combat, et ne lance pas de grosse attaque en toute fin.")
+        elif fp["zero"] / fp["n"] >= 0.6:
+            txt += "\n⚠️ Tu perds souvent sans avoir marqué : ton attaque manque de pression."
+            priorites.append("**Attaque** : tu perds sans marquer. Mets de la pression sur la voie opposée quand l'adversaire pose sa carte principale, et garde une carte de dégâts pour la tour.")
+        sections2.append("**🥊 Comment tu perds**\n" + txt)
+    # bêtes noires
     if mauvais or noires:
         txt = []
         for plan, g, w in mauvais[:2]:
@@ -292,11 +470,22 @@ def construire(tag):
         if noires:
             txt.append("• Cartes qui reviennent dans tes défaites : "
                        + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu {e['d']}/{e['g']})" for e in noires))
-        sections.append("**🎯 Tes bêtes noires**\n" + "\n".join(txt))
+        sections2.append("**🎯 Tes bêtes noires**\n" + "\n".join(txt))
     else:
-        sections.append("**🎯 Tes bêtes noires**\nAucun type de deck ne te bat de façon répétée sur cet échantillon. 👍")
-
-    # --- Élixir
+        sections2.append("**🎯 Tes bêtes noires**\nAucun type de deck ne te bat de façon répétée sur cet échantillon. 👍")
+    # vitesse des decks adverses
+    va = vitesse_adverse(combats)
+    if len(va) >= 2:
+        txt = "\n".join(f"• Decks {k} : {w}/{g} (`{pct(w, g)}`)" for k, (g, w) in va.items())
+        pire = min(va.items(), key=lambda x: x[1][1] / x[1][0])
+        if pire[1][1] / pire[1][0] <= 0.34:
+            txt += f"\n⚠️ Les decks {pire[0].split(' (')[0]} te posent le plus de problèmes."
+            conseil = {"rapides": "contre un deck rapide, ne pose pas ta grosse carte en premier et garde de l'élixir pour défendre : ils veulent te faire dépenser pour t'attaquer ensuite.",
+                       "moyens": "joue la défense en premier, puis contre-attaque avec les unités qui ont survécu.",
+                       "lourds": "contre un deck lourd, ne laisse pas leur élixir se remplir : mets la pression pendant qu'ils investissent."}[pire[0].split(" (")[0]]
+            priorites.append(f"**Decks {pire[0].split(' (')[0]}** : {conseil}")
+        sections2.append("**🏎️ Vitesse des decks adverses**\n" + txt)
+    # élixir
     if el:
         txt = f"Élixir perdu en moyenne : `{el['moy']:.1f}` par combat"
         if el["victoires"] is not None and el["defaites"] is not None:
@@ -304,9 +493,8 @@ def construire(tag):
         if el["moy"] >= 1.5 or (el["defaites"] is not None and el["victoires"] is not None and el["defaites"] - el["victoires"] >= 0.8):
             txt += "\n⚠️ Tu laisses ton élixir plein trop souvent, surtout quand tu perds."
             priorites.append("**Élixir** : pose une carte dès que tu approches des 10 : un élixir perdu est un échange offert à l'adversaire.")
-        sections.append("**⚡ Gestion de l'élixir**\n" + txt)
-
-    # --- Mental et horaires
+        sections2.append("**⚡ Gestion de l'élixir**\n" + txt)
+    # mental, horaires, fatigue
     txt = []
     if ti:
         (g1, w1), (g2, w2) = ti
@@ -314,18 +502,20 @@ def construire(tag):
         if w1 / g1 + 0.2 <= w2 / g2:
             txt.append("⚠️ Tu joues moins bien juste après une défaite.")
             priorites.append("**Après une défaite** : fais une pause de quelques minutes avant de relancer, ça rapporte plus que d'enchaîner.")
+    if fa:
+        (gd, wd), (gf, wf) = fa
+        txt.append(f"Dans une session : combats 1 à 3 `{pct(wd, gd)}` ({gd}) · à partir du 6ᵉ `{pct(wf, gf)}` ({gf})")
+        if wd / gd - wf / gf >= 0.2:
+            txt.append("⚠️ Tu fatigues : tes résultats chutent quand tu enchaînes les combats.")
+            priorites.append("**Fatigue** : arrête-toi après 5 combats d'affilée, ou fais une pause avant de continuer : tes résultats baissent nettement après le 6ᵉ.")
     if mo:
         (n1, (g1, p1)), (n2, (g2, p2)) = mo
         txt.append(f"Ton meilleur créneau : {n1} (`{100 * p1:.0f}%`, {g1} combats) · le moins bon : {n2} (`{100 * p2:.0f}%`, {g2})")
     if txt:
-        sections.append("**🧠 Mental et horaires**\n" + "\n".join(txt))
+        sections2.append("**🧠 Mental, fatigue et horaires**\n" + "\n".join(txt))
+    embeds.append({"title": "🔬 Comment tu joues", "color": 15105570, "description": ("\n\n".join(sections2))[:4000]})
 
-    embed1 = {"title": f"🧠 Coach de {nom}", "color": 15105570,
-              "description": ("\n\n".join(sections))[:4000],
-              "footer": {"text": f"Basé sur tes {b['n']} derniers combats (limite de l'API) : indicatif, pas une vérité absolue"}}
-    embeds = [embed1]
-
-    # --- Deck principal (même moteur que le bot d'analyse de deck)
+    # ===== Embed 3 : deck principal (même moteur que le bot d'analyse de deck) =====
     modes_jeu = [m for m in ("classe", "voie") if b["par_mode"].get(m)]
     mode = max(modes_jeu, key=lambda m: b["par_mode"][m][0]) if modes_jeu else None
     stats, p0, dp = None, 0.5, None
@@ -347,21 +537,21 @@ def construire(tag):
         if data:
             stats, p0, _ = d.stats_cartes(data)
 
-    # --- Cartes
+    # ===== Embed 4 : cartes et deck proche des meilleurs =====
     if stats and profil:
+        sections4 = []
         jouees = {x["id"] for c in combats if c["mode"] in ("classe", "voie") for x in c["mes"]}
         fortes = cartes_fortes_non_jouees(profil, jouees, stats, p0)
         montees = cartes_a_monter(dp, profil, stats, p0) if dp else []
-        txt = []
         if montees:
-            txt.append("**⬆️ À monter en priorité** (dans ton deck) : " + ", ".join(f"{n} (niv. {niv}/16)" for _, n, niv in montees))
+            sections4.append("**⬆️ À monter en priorité** (dans ton deck) : " + ", ".join(f"{n} (niv. {niv}/16)" for _, n, niv in montees))
             priorites.append(f"**Niveaux** : monte d'abord {montees[0][1]} (niv. {montees[0][2]}/16), c'est la carte de ton deck qui te coûte le plus en puissance.")
+        ids_dp = [x["id"] for x in dp["cartes"]] if dp else []
+        evo_dp = [(x.get("evolutionLevel") or 0) > 0 for x in dp["cartes"]] if dp else []
+        slots_dp = [1 if e else 0 for e in evo_dp]
         if fortes:
-            txt.append("**💎 Cartes fortes que tu possèdes sans les jouer** : "
-                       + ", ".join(f"{n} (niv. {niv}/16, `{100 * wr:.1f}%`)" for _, n, niv, wr, _ in fortes))
-            ids_dp = [x["id"] for x in dp["cartes"]] if dp else []
-            evo_dp = [(x.get("evolutionLevel") or 0) > 0 for x in dp["cartes"]] if dp else []
-            slots_dp = [1 if e else 0 for e in evo_dp]
+            sections4.append("**💎 Cartes fortes que tu possèdes sans les jouer** : "
+                             + ", ".join(f"{n} (niv. {niv}/16, `{100 * wr:.1f}%`)" for _, n, niv, wr, _ in fortes))
             propose = None
             for _, nom_c, niv_c, wr_c, cid in fortes:
                 r = deck_avec_carte(ids_dp, evo_dp, cid, stats, p0, profil) if dp else None
@@ -379,13 +569,13 @@ def construire(tag):
             else:
                 priorites.append(f"**Essaie** {fortes[0][1]} : elle gagne plus que la moyenne chez les meilleurs joueurs. "
                                  "Aucune carte de ton deck ne peut lui laisser sa place sans l'affaiblir : elle demande de revoir plus de cartes.")
-        if txt:
-            embeds.append({"title": "🃏 Tes cartes", "color": 15105570, "description": "\n\n".join(txt)[:4000]})
+        if sections4:
+            embeds.append({"title": "🃏 Tes cartes", "color": 15105570, "description": "\n\n".join(sections4)[:4000]})
 
-    # --- Plan d'action
+    # ===== Embed 5 : plan d'action =====
     if priorites:
         embeds.append({"title": "🚀 Ton plan d'action", "color": 5763719,
-                       "description": "\n\n".join(f"{i + 1}. {p}" for i, p in enumerate(priorites[:5]))[:4000],
+                       "description": "\n\n".join(f"{i + 1}. {p}" for i, p in enumerate(priorites[:6]))[:4000],
                        "footer": {"text": "Relance !coach #TAG dans quelques jours pour voir ta progression"}})
     return None, embeds
 
