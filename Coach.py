@@ -208,8 +208,30 @@ def cartes_fortes_non_jouees(profil, jouees, stats, p0):
             continue
         niv = d.niveau_jeu(c)
         if niv >= 13 and s["wr"] - p0 >= 0.025:
-            res.append((s["wr"] - p0, d.nom_fr(s["name"]), niv, s["wr"]))
+            res.append((s["wr"] - p0, d.nom_fr(s["name"]), niv, s["wr"], cid))
     return sorted(res, reverse=True)[:4]
+
+
+def deck_avec_carte(ids, evo, carte_id, stats, p0, profil):
+    """Deck de départ où la carte conseillée prend la place de la carte la moins utile du même rôle.
+    Renvoie (nouveau_deck, carte_sortante, note_avant, note_apres) ou None si elle ne s'intègre pas sans dégrader le deck."""
+    cible = stats.get(carte_id)
+    if not cible or carte_id in ids:
+        return None
+    avant = d.note_deck(ids, stats, p0, profil)
+    meilleur = None
+    for pos, i in enumerate(ids):
+        s = stats.get(i)
+        if evo[pos] or not s or d.role(s["name"]) != d.role(cible["name"]) or abs(s.get("elixir", 0) - cible.get("elixir", 0)) > 2:
+            continue
+        nouveau = list(ids)
+        nouveau[pos] = carte_id
+        note = d.note_deck(nouveau, stats, p0, profil)
+        if meilleur is None or note > meilleur[3]:
+            meilleur = (nouveau, i, avant, note)
+    if meilleur is None or meilleur[3] < avant - 0.002:           # pas question de proposer un deck nettement moins bon
+        return None
+    return meilleur
 
 
 def cartes_a_monter(deck, profil, stats, p0):
@@ -336,15 +358,34 @@ def construire(tag):
             priorites.append(f"**Niveaux** : monte d'abord {montees[0][1]} (niv. {montees[0][2]}/16), c'est la carte de ton deck qui te coûte le plus en puissance.")
         if fortes:
             txt.append("**💎 Cartes fortes que tu possèdes sans les jouer** : "
-                       + ", ".join(f"{n} (niv. {niv}/16, `{100 * wr:.1f}%`)" for _, n, niv, wr in fortes))
-            priorites.append(f"**Essaie** {fortes[0][1]} : elle gagne plus que la moyenne chez les meilleurs joueurs et tu l'as déjà à un bon niveau.")
+                       + ", ".join(f"{n} (niv. {niv}/16, `{100 * wr:.1f}%`)" for _, n, niv, wr, _ in fortes))
+            ids_dp = [x["id"] for x in dp["cartes"]] if dp else []
+            evo_dp = [(x.get("evolutionLevel") or 0) > 0 for x in dp["cartes"]] if dp else []
+            slots_dp = [1 if e else 0 for e in evo_dp]
+            propose = None
+            for _, nom_c, niv_c, wr_c, cid in fortes:
+                r = deck_avec_carte(ids_dp, evo_dp, cid, stats, p0, profil) if dp else None
+                if r:
+                    propose = (nom_c, niv_c, r)
+                    break
+            if propose:
+                nom_c, niv_c, (nouveau, sortante, av, ap) = propose
+                lien = d.lien_deck(nouveau, slots_dp, getattr(d, "TT_DEFAUT", 159000000))
+                priorites.append(
+                    f"**Essaie {nom_c}** (niv. {niv_c}/16) : elle gagne plus que la moyenne chez les meilleurs joueurs et tu l'as déjà à un bon niveau.\n"
+                    f"🔁 {d.nom_fr(stats[sortante]['name'])} → **{nom_c}** · estimé `≈{100 * av:.1f}%` → `≈{100 * ap:.1f}%` "
+                    f"(à la place du changement proposé plus haut, pas en plus)\n"
+                    f"[📥 Copier ce deck]({lien})")
+            else:
+                priorites.append(f"**Essaie** {fortes[0][1]} : elle gagne plus que la moyenne chez les meilleurs joueurs. "
+                                 "Aucune carte de ton deck ne peut lui laisser sa place sans l'affaiblir : elle demande de revoir plus de cartes.")
         if txt:
             embeds.append({"title": "🃏 Tes cartes", "color": 15105570, "description": "\n\n".join(txt)[:4000]})
 
     # --- Plan d'action
     if priorites:
         embeds.append({"title": "🚀 Ton plan d'action", "color": 5763719,
-                       "description": "\n\n".join(f"{i + 1}. {p}" for i, p in enumerate(priorites[:4]))[:4000],
+                       "description": "\n\n".join(f"{i + 1}. {p}" for i, p in enumerate(priorites[:5]))[:4000],
                        "footer": {"text": "Relance !coach #TAG dans quelques jours pour voir ta progression"}})
     return None, embeds
 
