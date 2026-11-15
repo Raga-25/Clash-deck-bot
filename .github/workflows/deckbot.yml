@@ -70,7 +70,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for f in data_gdc.json data_classe.json data_voie.json data_paires.json synergies.json; do
+          for f in data_gdc.json data_classe.json data_voie.json data_paires.json data_decks.json synergies.json; do
             if [ -f "$f" ]; then git add "$f"; fi
           done
           if ! git diff --cached --quiet; then
