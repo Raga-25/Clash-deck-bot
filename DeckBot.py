@@ -64,7 +64,8 @@ MIN_PARTIES_CARTE = 100            # une carte doit avoir au moins 100 parties p
 LISSAGE = 100                      # lissage du winrate des cartes
 MAX_NIVEAUX_MANQUANTS = 3          # on ne conseille pas une carte à plus de 3 niveaux du max
 NB_CHANGEMENTS = 2                 # au plus 2 cartes changées
-GAIN_MINIMUM = 0.004               # gain estimé minimum (0,4 point)
+GAIN_MINIMUM = 0.004               # gain estimé minimum (0,4 point) pour remplacer une carte très sous-niveau
+GAIN_MINIMUM_NIVEAU_OK = 0.012     # pour remplacer une carte correctement montée : il faut un vrai gain (1,2 point), pas un détail
 PENALITE_NIVEAU = 0.008            # estimation : -0,8 point par niveau manquant et par carte (avant moyenne sur 8 cartes)
 PENALITE_NIVEAU_EXTRA = 0.006      # en plus, -0,6 point par niveau manquant au-delà de 4 (une carte très sous-niveau s'effondre)
 NIVEAUX_MANQUANTS_ALERTE = 4       # une carte à 4 niveaux ou plus du max est signalée « à monter »
@@ -696,7 +697,8 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
                     continue
                 nouveau = cartes[:pos] + [entrant] + cartes[pos + 1:]
                 gain = note_deck(nouveau, stats, p0, profil) - base
-                if gain >= GAIN_MINIMUM and (meilleur is None or gain > meilleur[0]):
+                sous_niveau = bool(profil) and sortant in profil and manque(profil[sortant]) >= NIVEAUX_MANQUANTS_ALERTE
+                if gain >= (GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK) and (meilleur is None or gain > meilleur[0]):
                     meilleur = (gain, pos, sortant, entrant)
         if not meilleur:
             break
@@ -1088,7 +1090,7 @@ def construire_reponse(mode, decks, tag, devine):
     elif len(decks) > 1:
         sections.append("-# Plusieurs decks collés : seul le premier est analysé dans ce mode.")
     sections.append("-# Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : "
-                    "un conseil, pas une garantie.")
+                    "un conseil, pas une garantie. Je juge les cartes une par une, pas ta façon de jouer : si ton deck marche déjà bien, garde-le et monte tes cartes.")
     embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": "\n\n".join(sections)[:4000], "color": 3447003,
              "footer": {"text": "Autre deck ? Colle le lien (écris gdc, voie ou classe avant) · !aide pour les consignes"}}
     return None, embed
