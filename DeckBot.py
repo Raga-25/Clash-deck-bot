@@ -66,6 +66,7 @@ MAX_NIVEAUX_MANQUANTS = 3          # on ne conseille pas une carte à plus de 3 
 NB_CHANGEMENTS = 2                 # au plus 2 cartes changées
 GAIN_MINIMUM = 0.004               # gain estimé minimum (0,4 point)
 PENALITE_NIVEAU = 0.008            # estimation : -0,8 point par niveau manquant et par carte (avant moyenne sur 8 cartes)
+PENALITE_NIVEAU_EXTRA = 0.006      # en plus, -0,6 point par niveau manquant au-delà de 4 (une carte très sous-niveau s'effondre)
 NIVEAUX_MANQUANTS_ALERTE = 4       # une carte à 4 niveaux ou plus du max est signalée « à monter »
 AGE_MAX_DEMANDE_H = 12             # on ignore les demandes plus vieilles que 12 h
 MAX_DEMANDES_PAR_PASSAGE = 5
@@ -658,7 +659,8 @@ def note_deck(ids, stats, p0, profil):
     total = 0.0
     for i in ids:
         wr = stats[i]["wr"] if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE else p0
-        pen = PENALITE_NIVEAU * manque(profil[i]) if profil and i in profil else 0.0
+        m = manque(profil[i]) if profil and i in profil else 0
+        pen = PENALITE_NIVEAU * m + PENALITE_NIVEAU_EXTRA * max(0, m - 4)
         total += wr - pen
     return total / len(ids) + bonus_synergie(ids, _SYN["data"], _SYN["mode"])
 
