@@ -56,6 +56,7 @@ ALIAS = {
     "voie": "voie", "trophees": "voie", "ladder": "voie", "route": "voie",
 }
 MODE_PAR_DEFAUT = "classe"
+TT_DEFAUT = 159000000                # tour par défaut dans le lien de copie
 
 MIN_COMBATS_MODE = 300             # en dessous, pas assez de données pour évaluer ce mode
 MIN_PARTIES_CARTE = 100            # une carte doit avoir au moins 100 parties pour être jugée
@@ -63,7 +64,8 @@ LISSAGE = 100                      # lissage du winrate des cartes
 MAX_NIVEAUX_MANQUANTS = 3          # on ne conseille pas une carte à plus de 3 niveaux du max
 NB_CHANGEMENTS = 2                 # au plus 2 cartes changées
 GAIN_MINIMUM = 0.004               # gain estimé minimum (0,4 point)
-PENALITE_NIVEAU = 0.004            # estimation : -0,4 point par niveau manquant et par carte
+PENALITE_NIVEAU = 0.008            # estimation : -0,8 point par niveau manquant et par carte (avant moyenne sur 8 cartes)
+NIVEAUX_MANQUANTS_ALERTE = 4       # une carte à 4 niveaux ou plus du max est signalée « à monter »
 AGE_MAX_DEMANDE_H = 12             # on ignore les demandes plus vieilles que 12 h
 MAX_DEMANDES_PAR_PASSAGE = 5
 
@@ -74,7 +76,9 @@ FENETRE_PAIRES_JOURS = 21          # les paires des 21 derniers jours comptent
 MIN_PARTIES_PAIRE = 150            # une paire doit avoir au moins 150 parties (tous modes) pour compter
 MIN_PARTIES_PAIRE_MODE = 40        # pour avoir sa propre valeur dans un mode
 LISSAGE_SYNERGIE = 300             # plus la paire a de parties, moins on la rapproche de zéro
-POIDS_SYNERGIE = 1.0               # poids de la synergie dans l'estimation d'un deck
+POIDS_SYNERGIE = 0.25              # poids de la synergie dans l'estimation d'un deck (les 28 paires d'un même bon deck gagnent toutes : on ne les additionne pas en plein)
+PLAFOND_PAIRE = 0.03               # une paire ne compte jamais pour plus de 3 points
+PLAFOND_BONUS = 0.03               # et la synergie totale d'un deck ne dépasse pas 3 points
 SEUIL_CITATION = 0.005             # une paire n'est citée que si elle pèse au moins 0,5 point
 
 CARTES_VICTOIRE = {
@@ -107,7 +111,7 @@ NOMS_FR = {
     "Royal Giant": "Géant royal", "Guards": "Gardes", "Princess": "Princesse",
     "Dark Prince": "Prince des ténèbres", "Three Musketeers": "Trois Mousquetaires",
     "Lava Hound": "Molosse de lave", "Ice Spirit": "Esprit de glace", "Fire Spirit": "Esprit de feu",
-    "Miner": "Mineur", "Sparky": "Sparky", "Bowler": "Bouliste", "Lumberjack": "Bûcheron",
+    "Miner": "Mineur", "Sparky": "Zappy", "Bowler": "Bouliste", "Lumberjack": "Bûcheron",
     "Battle Ram": "Bélier de combat", "Inferno Dragon": "Dragon infernal", "Ice Golem": "Golem de glace",
     "Mega Minion": "Méga gargouille", "Dart Goblin": "Gobelin à sarbacane",
     "Goblin Gang": "Bande de gobelins", "Electro Wizard": "Électro-sorcier",
@@ -116,7 +120,7 @@ NOMS_FR = {
     "Bats": "Chauves-souris", "Royal Ghost": "Fantôme royal", "Ram Rider": "Chevaucheur de bélier",
     "Zappies": "Zappies", "Rascals": "Garnements", "Cannon Cart": "Chariot canon",
     "Mega Knight": "Méga chevalier", "Skeleton Barrel": "Tonneau de squelettes",
-    "Flying Machine": "Machine volante", "Wall Breakers": "Casseurs de murs",
+    "Flying Machine": "Machine volante", "Wall Breakers": "Sapeurs",
     "Royal Hogs": "Cochons royaux", "Goblin Giant": "Géant gobelin", "Fisherman": "Pêcheur",
     "Magic Archer": "Archer magique", "Electro Dragon": "Dragon électrique",
     "Firecracker": "Artificière", "Mighty Miner": "Mineur puissant", "Elixir Golem": "Golem d'élixir",
@@ -467,8 +471,9 @@ def bonus_synergie(ids, syn, mode):
     if not syn:
         return 0.0
     ids = list(ids)
-    total = sum(synergie_paire(ids[i], ids[j], syn, mode) for i in range(len(ids)) for j in range(i + 1, len(ids)))
-    return POIDS_SYNERGIE * total / len(ids)
+    total = sum(max(-PLAFOND_PAIRE, min(PLAFOND_PAIRE, synergie_paire(ids[i], ids[j], syn, mode)))
+                for i in range(len(ids)) for j in range(i + 1, len(ids)))
+    return max(-PLAFOND_BONUS, min(PLAFOND_BONUS, POIDS_SYNERGIE * total / len(ids)))
 
 
 def lignes_synergie(ids, syn, mode, nom):
@@ -676,26 +681,35 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil):
     return decks, changements
 
 
-def autres_decks_guerre(tag, decks_colles, combien):
-    """Retrouve les autres decks de guerre du joueur dans ses combats récents (l'API ne garde que 25 combats).
-    On ne garde que des decks sans carte commune avec les decks collés ni entre eux."""
-    if not tag or combien <= 0:
+def decks_recents(tag, mode):
+    """Decks joués par le joueur dans ses combats récents du mode (l'API ne garde que 25 combats).
+    Renvoie une liste de {"ids", "slots", "n", "rang"}, du plus joué au moins joué (à égalité, du plus récent)."""
+    if not tag:
         return []
     combats = api_get(f"/players/{enc(tag)}/battlelog") or []
     vus = {}
     for rang, b in enumerate(combats):                      # du plus récent au plus ancien
-        if b.get("type") not in MODES["gdc"]["types"]:
+        if b.get("type") not in MODES[mode]["types"]:
             continue
         eq = (b.get("team") or [None])[0]
         cartes = (eq or {}).get("cards") or []
         ids = [c["id"] for c in cartes]
         if len(ids) != 8 or len(set(ids)) != 8:
             continue
-        e = vus.setdefault(tuple(sorted(ids)), {"ids": ids, "n": 0, "rang": rang})
+        e = vus.setdefault(tuple(sorted(ids)), {"ids": ids, "slots": [1 if (c.get("evolutionLevel") or 0) > 0 else 0 for c in cartes],
+                                                "n": 0, "rang": rang})
         e["n"] += 1
+    return sorted(vus.values(), key=lambda e: (-e["n"], e["rang"]))
+
+
+def autres_decks_guerre(tag, decks_colles, combien):
+    """Retrouve les autres decks de guerre du joueur dans ses combats récents.
+    On ne garde que des decks sans carte commune avec les decks collés ni entre eux."""
+    if combien <= 0:
+        return []
     interdites = {c for d in decks_colles for c in d}
     choisis = []
-    for e in sorted(vus.values(), key=lambda e: (-e["n"], e["rang"])):
+    for e in decks_recents(tag, "gdc"):
         if interdites & set(e["ids"]):
             continue
         choisis.append(e["ids"])
@@ -703,6 +717,37 @@ def autres_decks_guerre(tag, decks_colles, combien):
         if len(choisis) == combien:
             break
     return choisis
+
+
+def decks_du_joueur(mode, tag):
+    """Demande sans lien : on lit le ou les decks dans les combats récents du joueur.
+    Renvoie (decks[(ids, slots, tt)], note) ou lève ValueError."""
+    nom_mode = MODES[mode]["nom"]
+    recents = decks_recents(tag, mode)
+    if mode == "gdc":
+        interdites, choisis = set(), []
+        for e in recents:
+            if interdites & set(e["ids"]):
+                continue
+            choisis.append((e["ids"], e["slots"], TT_DEFAUT))
+            interdites |= set(e["ids"])
+            if len(choisis) == 4:
+                break
+        if not choisis:
+            raise ValueError(f"Je ne trouve aucun combat de guerre récent pour {tag}. L'historique ne garde que les 25 derniers combats : "
+                             "colle plutôt le lien « Copier le deck » de tes decks de guerre.")
+        n = len(choisis)
+        return choisis, (f"J'ai retrouvé {n} deck{'s' if n > 1 else ''} de guerre dans tes derniers combats "
+                         f"(sans carte en commun).")
+    if recents:
+        e = min(recents, key=lambda e: e["rang"])            # le deck du combat le plus récent
+        return [(e["ids"], e["slots"], TT_DEFAUT)], f"Deck lu dans ton dernier combat en {nom_mode}."
+    p = api_get(f"/players/{enc(tag)}")
+    cartes = (p or {}).get("currentDeck") or []
+    ids = [c["id"] for c in cartes]
+    if len(ids) == 8 and len(set(ids)) == 8:
+        return [(ids, [0] * 8, TT_DEFAUT)], "Aucun combat récent dans ce mode : j'ai pris ton deck actuel (sans ses évolutions)."
+    raise ValueError(f"Je ne trouve pas de deck pour {tag}. Vérifie ton tag, ou colle le lien « Copier le deck ».")
 
 
 def points_attention(ids, stats, profil):
@@ -760,11 +805,13 @@ Exemple : `gdc` puis ton message copié
 • jusqu'à 2 cartes à remplacer (niveaux et élixir avant/après)
 • un lien pour copier le deck amélioré
 
+🆔 **Sans lien** : écris juste ton tag, avec le mode : `gdc #TAG`, `voie #TAG`, `classe #TAG` ou `#TAG` (classé). Le bot lit ton deck dans tes derniers combats.
+
 💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Un deck par message (jusqu'à 4 en guerre)."""
 
 AIDE = ("Utilise : `!deck <mode> <lien du deck>`\n"
         "Modes : `gdc` (guerre), `classe` (Parcours des légendes), `voie` (voie des trophées).\n"
-        "Le lien s'obtient dans le jeu avec « Copier le deck ».")
+        "Le lien s'obtient dans le jeu avec « Copier le deck ». Sans lien, écris ton tag : `gdc #TAG`.")
 
 
 def lire_un_lien(url):
@@ -800,7 +847,11 @@ def lire_demande(contenu):
         decks.append((ids, slots, tt))
         tag = tag or t
     if not decks:
-        raise ValueError("Je ne trouve pas de deck dans ton message. " + AIDE)
+        m_tag = re.search(r"#([0-9a-z]{3,15})\b", texte)
+        if not m_tag:
+            raise ValueError("Je ne trouve pas de deck dans ton message. " + AIDE)
+        tag = "#" + m_tag.group(1).upper()
+        texte = texte.replace(m_tag.group(0), " ")
     avant_lien = re.sub(r"https?://\S+", " ", texte)
     mode, devine = None, False
     for mot in re.findall(r"[a-z]+", avant_lien.replace("!deck", " ")):
@@ -845,6 +896,9 @@ def donnees_du_mode(mode):
 
 def construire_reponse(mode, decks, tag, devine):
     """Renvoie (texte_simple, embed)."""
+    note_auto = None
+    if not decks:
+        decks, note_auto = decks_du_joueur(mode, tag)
     ids, slots, tt = decks[0]
     nom_mode = MODES[mode]["nom"]
     data, source = donnees_du_mode(mode)
@@ -870,7 +924,7 @@ def construire_reponse(mode, decks, tag, devine):
     if mode == "gdc" and tag:
         autres = autres_decks_guerre(tag, [d[0] for d in decks], 4 - len(decks))
     if mode == "gdc" and len(decks) >= 2:
-        return None, construire_embed_gdc(decks, autres, stats, p0, combats, profil, source)
+        return None, construire_embed_gdc(decks, autres, stats, p0, combats, profil, source, note_auto)
     exclues = {c for a in autres for c in a}
     evo = [s > 0 for s in slots]
 
@@ -894,6 +948,7 @@ def construire_reponse(mode, decks, tag, devine):
             lignes.append(f"{nom_carte(i)}{' ✨' if evo[pos] else ''} — peu de données")
     sections = [f"**{etiquette(score, p0)}** · winrate estimé `≈{100 * score:.1f}%` "
                 f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode}"
+                + (f"\n-# {note_auto}" if note_auto else "")
                 + (" · données lues en direct" if source == "direct" else "")
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
@@ -916,6 +971,11 @@ def construire_reponse(mode, decks, tag, devine):
                         + ("" if profil else "\n-# Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
     else:
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
+    if profil:
+        faibles = sorted((niveau_jeu(profil[i]), i) for i in ids if i in profil and manque(profil[i]) >= NIVEAUX_MANQUANTS_ALERTE)
+        if faibles:
+            sections.append("**⬆️ À monter en priorité** : " + ", ".join(nom_carte(i) for _, i in faibles[:3])
+                            + "\n-# Une carte très en dessous du niveau max pèse plus qu'un changement de carte.")
     if mode == "gdc":
         if autres:
             sections.append("**🛡️ Tes autres decks de guerre** (retrouvés dans ton historique, je n'utilise aucune de leurs cartes)\n"
@@ -932,7 +992,7 @@ def construire_reponse(mode, decks, tag, devine):
     return None, embed
 
 
-def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source):
+def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source, note_auto=None):
     """Analyse de plusieurs decks de guerre à la fois, sans carte commune.
     `autres` : decks retrouvés dans l'historique du joueur, qui ne sont pas modifiés (seules leurs cartes sont protégées)."""
     nb = len(decks)
@@ -955,6 +1015,8 @@ def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source):
     entete = (f"**{etiquette(avant, p0)}** · moyenne estimée de tes {nb} decks `≈{100 * avant:.1f}%` → "
               f"`≈{100 * apres:.1f}%` (moyenne du mode : `{100 * p0:.1f}%`)\n"
               f"-# {combats} combats analysés · Guerre de clan" + (" · données lues en direct" if source == "direct" else ""))
+    if note_auto:
+        entete += f"\n-# {note_auto}"
     if doublons:
         entete += ("\n⚠️ Cartes présentes dans plusieurs decks : " + ", ".join(nom_fr(stats[c]["name"]) if c in stats else str(c) for c in doublons)
                    + " (corrigé ci-dessous)")
@@ -1057,7 +1119,8 @@ def repondre():
                     discord("DELETE", f"/channels/{CHANNEL_ID}/messages/{m['id']}/reactions/{COCHE}/@me")
             continue
         # Une demande : soit « !deck ... », soit directement un lien « Copier le deck » du jeu collé dans le salon
-        if not (texte.startswith("!deck") or re.search(r"copydeck\?deck=[\d;]+", texte)):
+        if not (texte.startswith("!deck") or re.search(r"copydeck\?deck=[\d;]+", texte)
+                or re.fullmatch(r"(?:[a-z]+\s+)?#[0-9a-z]{3,15}", texte)):
             continue
         try:
             age = (maintenant - datetime.datetime.fromisoformat(m["timestamp"])).total_seconds() / 3600
