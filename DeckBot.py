@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import json
+import math
 import time
 import unicodedata
 import datetime
@@ -72,6 +73,10 @@ MAX_DEMANDES_PAR_PASSAGE = 5
 # Synergies entre paires de cartes (comptées pendant la collecte, calculées chaque semaine)
 FICHIER_PAIRES = "data_paires.json"
 FICHIER_SYNERGIES = "synergies.json"
+FICHIER_DECKS = "data_decks.json"      # decks complets des meilleurs joueurs (classé et voie) : parties et victoires par jour
+FENETRE_DECKS_JOURS = 10
+MIN_PARTIES_DECK = 8                   # un deck doit avoir au moins 8 parties pour être proposé
+MIN_CARTES_COMMUNES = 5                # et partager au moins 5 cartes avec le tien
 FENETRE_PAIRES_JOURS = 21          # les paires des 21 derniers jours comptent
 MIN_PARTIES_PAIRE = 150            # une paire doit avoir au moins 150 parties (tous modes) pour compter
 MIN_PARTIES_PAIRE_MODE = 40        # pour avoir sa propre valeur dans un mode
@@ -313,10 +318,88 @@ def collecter(mode, tags, data, paires=None):
     return nouveaux
 
 
+_DECKS_DU_JOUR = {}      # decks vus pendant cette collecte : jour -> mode -> "id,id,..." -> [parties, victoires]
+
+
+def charger_decks():
+    try:
+        with open(os.path.join(DOSSIER, FICHIER_DECKS), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("days", {})
+    return data
+
+
+def sauver_decks():
+    """Ajoute les decks vus pendant cette collecte au fichier, garde 10 jours et allège les vieux jours."""
+    data = charger_decks()
+    for jour, modes in _DECKS_DU_JOUR.items():
+        for mode, decks in modes.items():
+            cible = data["days"].setdefault(jour, {}).setdefault(mode, {})
+            for cle, (g, w) in decks.items():
+                e = cible.setdefault(cle, [0, 0])
+                e[0] += g
+                e[1] += w
+    _DECKS_DU_JOUR.clear()
+    aujourdhui = aujourdhui_utc()
+    limite = (aujourdhui - datetime.timedelta(days=FENETRE_DECKS_JOURS)).strftime("%Y-%m-%d")
+    allege = (aujourdhui - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+    for jour in [j for j in data["days"] if j < limite]:
+        del data["days"][jour]
+    for jour, modes in data["days"].items():
+        if jour < allege:
+            for mode in modes:
+                modes[mode] = {k: v for k, v in modes[mode].items() if v[0] >= 2}
+    chemin = os.path.join(DOSSIER, FICHIER_DECKS)
+    with open(chemin + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    os.replace(chemin + ".tmp", chemin)
+    print(f"Decks enregistrés : {sum(len(m) for j in data['days'].values() for m in j.values())} decks sur {len(data['days'])} jours")
+
+
+def _wilson(g, w, z=1.96):
+    if g == 0:
+        return 0.0
+    p = w / g
+    return (p + z * z / (2 * g) - z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)) / (1 + z * z / g)
+
+
+def deck_proche(ids, mode, profil):
+    """Le deck des meilleurs joueurs le plus proche du tien (au moins 5 cartes communes), que tu peux jouer avec tes niveaux.
+    Renvoie (deck, tes_stats) ; deck = {cartes, g, w, communes, manquantes} ou None."""
+    decks = {}
+    for jour in charger_decks()["days"].values():
+        for cle, (g, w) in (jour.get(mode) or {}).items():
+            e = decks.setdefault(cle, [0, 0])
+            e[0] += g
+            e[1] += w
+    moi = set(ids)
+    cle_moi = ",".join(str(i) for i in sorted(ids))
+    candidats = []
+    for cle, (g, w) in decks.items():
+        if g < MIN_PARTIES_DECK or cle == cle_moi:
+            continue
+        cartes = [int(x) for x in cle.split(",")]
+        communes = len(moi & set(cartes))
+        if communes < MIN_CARTES_COMMUNES:
+            continue
+        manquantes = [c for c in cartes if profil and (c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS)]
+        candidats.append({"cartes": cartes, "g": g, "w": w, "communes": communes, "manquantes": manquantes, "score": _wilson(g, w)})
+    if not candidats:
+        return None, decks.get(cle_moi)
+    jouables = [c for c in candidats if not c["manquantes"]] or candidats
+    return max(jouables, key=lambda c: (c["score"], c["communes"])), decks.get(cle_moi)
+
+
 def compter_paires(paires, jour, mode, ids, victoire):
     """Ajoute un combat aux compteurs : cartes seules et 28 paires de cartes du deck."""
     m = paires["days"].setdefault(jour, {}).setdefault(mode, {"b": 0, "w": 0, "c": {}, "p": {}})
     v = 1 if victoire else 0
+    if mode in ("classe", "voie"):
+        e = _DECKS_DU_JOUR.setdefault(jour, {}).setdefault(mode, {}).setdefault(",".join(str(i) for i in sorted(ids)), [0, 0])
+        e[0] += 1
+        e[1] += v
     m["b"] += 1
     m["w"] += v
     for i, a in enumerate(ids):
@@ -526,6 +609,7 @@ def collecte_tous_modes():
         print(f"{mode} : {len(tags)} joueurs lus, {n} nouveaux combats ({len(data['days'])} jours en mémoire)")
     nettoyer_paires(paires, aujourdhui_utc())
     sauver_paires(paires)
+    sauver_decks()
     if echecs == len(MODES):
         sys.exit(1)
 
@@ -971,6 +1055,22 @@ def construire_reponse(mode, decks, tag, devine):
                         + ("" if profil else "\n-# Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
     else:
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
+    if mode in ("classe", "voie"):
+        proche, mon = deck_proche(ids, mode, profil)
+        if proche:
+            lui = set(proche["cartes"])
+            sortent = [nom_carte(i, False) for i in ids if i not in lui]
+            entrent = [nom_carte(i, False) for i in proche["cartes"] if i not in set(ids)]
+            evo_de = {i: slots[p] for p, i in enumerate(ids)}
+            slots_p = [evo_de.get(i, 0) for i in proche["cartes"]]
+            txt = (f"Le deck des meilleurs joueurs le plus proche du tien : `{100 * proche['w'] / proche['g']:.1f}%` de victoires "
+                   f"sur {proche['g']} parties ({proche['communes']} cartes en commun)\n🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
+            if mon and mon[0] >= MIN_PARTIES_DECK:
+                txt += f"\nTon deck exact chez les meilleurs : `{100 * mon[1] / mon[0]:.1f}%` sur {mon[0]} parties"
+            if proche["manquantes"]:
+                txt += "\n⚠️ Il te manque ou tu as trop bas : " + ", ".join(nom_carte(i, False) for i in proche["manquantes"])
+            txt += f"\n[📥 Copier ce deck]({lien_deck(proche['cartes'], slots_p, tt)})"
+            sections.append("**🏅 Deck proche chez les meilleurs joueurs**\n" + txt)
     if profil:
         faibles = sorted((niveau_jeu(profil[i]), i) for i in ids if i in profil and manque(profil[i]) >= NIVEAUX_MANQUANTS_ALERTE)
         if faibles:
