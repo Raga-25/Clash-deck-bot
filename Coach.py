@@ -11,6 +11,7 @@ Lancement : python Coach.py repondre
 """
 import os
 import re
+import random
 import sys
 import json
 import math
@@ -39,13 +40,27 @@ PLANS = [
 ]
 NOM_PLAN = {"air": "decks aériens", "tank": "decks à gros tank", "siege": "decks de siège",
             "cycle": "decks rapides (cycle)", "lourd": "decks lourds", "autre": "autres decks"}
+RNG = random.Random()
+
+
+def v(*options):
+    """Une formulation au hasard : les conseils ne sont pas toujours les mêmes mots."""
+    return RNG.choice(options)
+
+
 CONSEIL_PLAN = {
-    "air": "garde toujours de quoi défendre dans les airs et ne le gaspille pas en attaque ; le sort et le bâtiment doivent rester dispos pour Ballon / Meute de lave.",
-    "tank": "punis le tank : attaque l'autre voie dès qu'il le pose, et réserve ton meilleur dégât pur pour le tuer au pont.",
-    "siege": "ne laisse pas le siège s'installer : mets la pression dès qu'il le pose et garde un sort ou une carte rapide pour le détruire.",
-    "cycle": "garde ton élixir pour défendre et fais des échanges positifs : évite de poser en avance, sinon tu te fais cycler.",
-    "lourd": "ne t'engage pas en défense avec des unités fragiles : use de bâtiment et de troupes à petits coûts pour tenir.",
-    "autre": "regarde quelle carte revient dans tes défaites et prépare-lui une réponse précise.",
+    "air": ("garde toujours de quoi défendre dans les airs et ne le gaspille pas en attaque ; le sort et le bâtiment doivent rester dispos pour Ballon / Meute de lave.",
+            "réserve ta réponse aérienne pour la défense, et vérifie que ton sort est prêt quand le Ballon ou la Meute de lave arrive."),
+    "tank": ("punis le tank : attaque l'autre voie dès qu'il le pose, et réserve ton meilleur dégât pur pour le tuer au pont.",
+             "dès que le tank est posé, contre-attaque sur l'autre voie ; garde ton plus gros dégât pour l'arrêter au pont."),
+    "siege": ("ne laisse pas le siège s'installer : mets la pression dès qu'il le pose et garde un sort ou une carte rapide pour le détruire.",
+              "empêche le siège de se poser tranquille : attaque-le tout de suite et garde un sort ou une carte rapide pour le détruire."),
+    "cycle": ("garde ton élixir pour défendre et fais des échanges positifs : évite de poser en avance, sinon tu te fais cycler.",
+              "face au cycle, ne pose pas en avance : défends avec peu d'élixir et ne rends que des échanges positifs."),
+    "lourd": ("ne t'engage pas en défense avec des unités fragiles : use de bâtiment et de troupes à petits coûts pour tenir.",
+              "contre un deck lourd, tiens avec un bâtiment et des petites troupes plutôt qu'avec des unités fragiles."),
+    "autre": ("regarde quelle carte revient dans tes défaites et prépare-lui une réponse précise.",
+              "repère la carte qui revient dans tes défaites et garde-lui une réponse précise."),
 }
 
 
@@ -386,7 +401,8 @@ def construire(tag):
     lignes = [f"**{b['v']}V – {b['l']}D** sur {b['n']} combats (`{pct(b['v'], termines)}` de victoires) · "
               f"3 couronnes : {b['trois']} gagnées, {b['subi']} subies"]
     if b["serie"] >= 3 and b["sens"] in ("V", "D"):
-        lignes.append(("🔥 " if b["sens"] == "V" else "🥶 ") + f"Série en cours : {b['serie']} {'victoires' if b['sens'] == 'V' else 'défaites'} d'affilée")
+        lignes.append(("🔥 " if b["sens"] == "V" else "🥶 ") + v(f"Série en cours : {b['serie']} {'victoires' if b['sens'] == 'V' else 'défaites'} d'affilée",
+                                                                  f"En ce moment : {b['serie']} {'victoires' if b['sens'] == 'V' else 'défaites'} de suite"))
     if b["trophees"] is not None:
         lignes.append(f"🏆 Trophées sur la période : `{b['trophees']:+d}`")
     noms_modes = {"classe": "Classé", "voie": "Voie des trophées", "gdc": "Guerre", "autre": "Autres"}
@@ -399,9 +415,9 @@ def construire(tag):
         glob, rec = fo
         txt = f"Ces derniers combats : `{100 * rec:.0f}%` de victoires · sur toute ta carrière : `{100 * glob:.0f}%`"
         if rec - glob >= 0.08:
-            txt += "\n🔥 Tu es en forme : au-dessus de ta moyenne habituelle."
+            txt += "\n🔥 " + v("Tu es en forme : au-dessus de ta moyenne habituelle.", "Bonne passe : tu fais mieux que d'habitude.", "Tu joues au-dessus de ton niveau moyen en ce moment.")
         elif glob - rec >= 0.08:
-            txt += "\n📉 Tu es en dessous de ta moyenne habituelle : change peut-être une carte, ou fais une pause."
+            txt += "\n📉 " + v("Tu es en dessous de ta moyenne habituelle : change peut-être une carte, ou fais une pause.", "Passage à vide : tu fais moins bien que d'habitude. Une pause peut aider.", "Tes résultats sont sous ta moyenne : ajuste ton deck ou souffle un peu.")
         sections1.append("**📈 Ta forme du moment**\n" + txt)
 
     pl = parcours_legendes(profil_brut, combats)
@@ -446,8 +462,8 @@ def construire(tag):
             txt = f"Écart moyen avec tes adversaires : `{en['moy']:+.1f}` niveau\n" + "\n".join(lg)
             sous, egal_sur = g["sous"], [g["egal"][0] + g["sur"][0], g["egal"][1] + g["sur"][1]]
             if sous[0] >= 3 and egal_sur[0] >= 3 and sous[1] / sous[0] + 0.2 <= egal_sur[1] / egal_sur[0]:
-                txt += "\n⚠️ Tu perds surtout quand tes cartes sont moins hautes que celles de l'adversaire."
-                priorites.append("**Niveaux** : tes défaites viennent surtout des combats où tu es sous-niveau : monte tes cartes avant de changer de deck.")
+                txt += "\n⚠️ " + v("Tu perds surtout quand tes cartes sont moins hautes que celles de l'adversaire.", "Tes défaites tombent surtout quand tu es sous-niveau.", "Le niveau pèse : tu gagnes nettement moins quand l'adversaire est plus haut.")
+                priorites.append("**Niveaux** : " + v("tes défaites viennent surtout des combats où tu es sous-niveau : monte tes cartes avant de changer de deck.", "avant de toucher à ton deck, monte tes cartes : c'est là que tu perds des points.", "tes cartes sont trop basses face à certains adversaires : le niveau avant le deck."))
             sections2.append("**⚖️ Niveaux des cartes**\n" + txt)
     # façon de perdre
     fp = facon_de_perdre(combats)
@@ -455,34 +471,37 @@ def construire(tag):
         txt = (f"Sur tes {fp['n']} défaites : {fp['de_peu']} de peu (1 couronne d'écart), {fp['nettes']} nettes (2 couronnes ou plus), "
                f"{fp['zero']} sans marquer de couronne")
         if fp["de_peu"] / fp["n"] >= 0.5:
-            txt += "\n⚠️ La moitié de tes défaites se jouent à une couronne : ce sont des matchs gagnables."
-            priorites.append("**Matchs serrés** : tu perds souvent d'une seule couronne. Garde un sort et un peu d'élixir pour la fin du combat, et ne lance pas de grosse attaque en toute fin.")
+            txt += "\n⚠️ " + v("La moitié de tes défaites se jouent à une couronne : ce sont des matchs gagnables.", "Beaucoup de défaites à une seule couronne : tu étais tout près.", "Tu perds souvent de justesse : ces matchs étaient à ta portée.")
+            priorites.append("**Matchs serrés** : " + v("tu perds souvent d'une seule couronne. Garde un sort et un peu d'élixir pour la fin du combat, et ne lance pas de grosse attaque en toute fin.", "garde un sort et de l'élixir pour les dernières secondes ; évite de tout lancer à la fin.", "dans les dernières minutes, joue prudent : un sort en réserve vaut souvent la couronne qui manque."))
         elif fp["zero"] / fp["n"] >= 0.6:
-            txt += "\n⚠️ Tu perds souvent sans avoir marqué : ton attaque manque de pression."
-            priorites.append("**Attaque** : tu perds sans marquer. Mets de la pression sur la voie opposée quand l'adversaire pose sa carte principale, et garde une carte de dégâts pour la tour.")
+            txt += "\n⚠️ " + v("Tu perds souvent sans avoir marqué : ton attaque manque de pression.", "Beaucoup de défaites sans couronne : il faut plus de pression.", "Tu repars souvent sans avoir touché de tour : attaque plus.")
+            priorites.append("**Attaque** : " + v("tu perds sans marquer. Mets de la pression sur la voie opposée quand l'adversaire pose sa carte principale, et garde une carte de dégâts pour la tour.", "quand l'adversaire dépense sa carte principale, attaque l'autre voie et garde un dégât pour la tour.", "force l'adversaire à défendre : lance une attaque sur la voie opposée dès qu'il investit."))
         sections2.append("**🥊 Comment tu perds**\n" + txt)
     # bêtes noires
     if mauvais or noires:
         txt = []
         for plan, g, w in mauvais[:2]:
             txt.append(f"• Contre les **{NOM_PLAN[plan]}** : {w}/{g} (`{pct(w, g)}`)")
-            priorites.append(f"**{NOM_PLAN[plan].capitalize()}** : {CONSEIL_PLAN[plan]}")
+            priorites.append(f"**{NOM_PLAN[plan].capitalize()}** : {v(*CONSEIL_PLAN[plan])}")
         if noires:
             txt.append("• Cartes qui reviennent dans tes défaites : "
                        + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu {e['d']}/{e['g']})" for e in noires))
         sections2.append("**🎯 Tes bêtes noires**\n" + "\n".join(txt))
     else:
-        sections2.append("**🎯 Tes bêtes noires**\nAucun type de deck ne te bat de façon répétée sur cet échantillon. 👍")
+        sections2.append("**🎯 Tes bêtes noires**\n" + v("Aucun type de deck ne te bat de façon répétée sur cet échantillon. 👍", "Pas de deck qui te pose problème de façon répétée ici. 👍", "Rien de récurrent dans tes défaites sur cet échantillon. 👍"))
     # vitesse des decks adverses
     va = vitesse_adverse(combats)
     if len(va) >= 2:
         txt = "\n".join(f"• Decks {k} : {w}/{g} (`{pct(w, g)}`)" for k, (g, w) in va.items())
         pire = min(va.items(), key=lambda x: x[1][1] / x[1][0])
         if pire[1][1] / pire[1][0] <= 0.34:
-            txt += f"\n⚠️ Les decks {pire[0].split(' (')[0]} te posent le plus de problèmes."
-            conseil = {"rapides": "contre un deck rapide, ne pose pas ta grosse carte en premier et garde de l'élixir pour défendre : ils veulent te faire dépenser pour t'attaquer ensuite.",
-                       "moyens": "joue la défense en premier, puis contre-attaque avec les unités qui ont survécu.",
-                       "lourds": "contre un deck lourd, ne laisse pas leur élixir se remplir : mets la pression pendant qu'ils investissent."}[pire[0].split(" (")[0]]
+            txt += "\n⚠️ " + v(f"Les decks {pire[0].split(' (')[0]} te posent le plus de problèmes.", f"Ton point faible : les decks {pire[0].split(' (')[0]}.", f"Tu souffles surtout contre les decks {pire[0].split(' (')[0]}.")
+            conseil = v(*{"rapides": ("contre un deck rapide, ne pose pas ta grosse carte en premier et garde de l'élixir pour défendre : ils veulent te faire dépenser pour t'attaquer ensuite.",
+                                       "face à un deck rapide, défends d'abord avec peu d'élixir : ne pose pas ta grosse carte en premier."),
+                          "moyens": ("joue la défense en premier, puis contre-attaque avec les unités qui ont survécu.",
+                                     "défends d'abord, et contre-attaque avec ce qui reste de ta défense."),
+                          "lourds": ("contre un deck lourd, ne laisse pas leur élixir se remplir : mets la pression pendant qu'ils investissent.",
+                                     "ne laisse pas un deck lourd poser tranquillement : attaque pendant qu'il dépense.")}[pire[0].split(" (")[0]])
             priorites.append(f"**Decks {pire[0].split(' (')[0]}** : {conseil}")
         sections2.append("**🏎️ Vitesse des decks adverses**\n" + txt)
     # élixir
@@ -491,8 +510,8 @@ def construire(tag):
         if el["victoires"] is not None and el["defaites"] is not None:
             txt += f" (victoires `{el['victoires']:.1f}` · défaites `{el['defaites']:.1f}`)"
         if el["moy"] >= 1.5 or (el["defaites"] is not None and el["victoires"] is not None and el["defaites"] - el["victoires"] >= 0.8):
-            txt += "\n⚠️ Tu laisses ton élixir plein trop souvent, surtout quand tu perds."
-            priorites.append("**Élixir** : pose une carte dès que tu approches des 10 : un élixir perdu est un échange offert à l'adversaire.")
+            txt += "\n⚠️ " + v("Tu laisses ton élixir plein trop souvent, surtout quand tu perds.", "Ton élixir déborde trop souvent, surtout dans tes défaites.", "Tu gaspilles de l'élixir en laissant la jauge pleine, surtout quand tu perds.")
+            priorites.append("**Élixir** : " + v("pose une carte dès que tu approches des 10 : un élixir perdu est un échange offert à l'adversaire.", "ne reste pas à 10 : joue une petite carte plutôt que de laisser déborder.", "une jauge pleine, c'est de l'élixir perdu : pose quelque chose avant d'y arriver."))
         sections2.append("**⚡ Gestion de l'élixir**\n" + txt)
     # mental, horaires, fatigue
     txt = []
@@ -500,14 +519,14 @@ def construire(tag):
         (g1, w1), (g2, w2) = ti
         txt.append(f"Après une défaite : `{pct(w1, g1)}` de victoires ({g1} combats) · après une victoire : `{pct(w2, g2)}` ({g2})")
         if w1 / g1 + 0.2 <= w2 / g2:
-            txt.append("⚠️ Tu joues moins bien juste après une défaite.")
-            priorites.append("**Après une défaite** : fais une pause de quelques minutes avant de relancer, ça rapporte plus que d'enchaîner.")
+            txt.append("⚠️ " + v("Tu joues moins bien juste après une défaite.", "Une défaite te déstabilise : tu rejoues moins bien juste après.", "Tes combats après une défaite sont plus faibles."))
+            priorites.append("**Après une défaite** : " + v("fais une pause de quelques minutes avant de relancer, ça rapporte plus que d'enchaîner.", "respire cinq minutes avant le combat suivant : enchaîner à chaud te coûte.", "ne relance pas tout de suite : une courte pause améliore le combat suivant."))
     if fa:
         (gd, wd), (gf, wf) = fa
         txt.append(f"Dans une session : combats 1 à 3 `{pct(wd, gd)}` ({gd}) · à partir du 6ᵉ `{pct(wf, gf)}` ({gf})")
         if wd / gd - wf / gf >= 0.2:
-            txt.append("⚠️ Tu fatigues : tes résultats chutent quand tu enchaînes les combats.")
-            priorites.append("**Fatigue** : arrête-toi après 5 combats d'affilée, ou fais une pause avant de continuer : tes résultats baissent nettement après le 6ᵉ.")
+            txt.append("⚠️ " + v("Tu fatigues : tes résultats chutent quand tu enchaînes les combats.", "Plus tu enchaînes, moins tu gagnes.", "La fatigue se voit : tes résultats baissent en fin de session."))
+            priorites.append("**Fatigue** : " + v("arrête-toi après 5 combats d'affilée, ou fais une pause avant de continuer : tes résultats baissent nettement après le 6ᵉ.", "limite tes sessions à 5 combats : ça baisse nettement à partir du 6ᵉ.", "fais une vraie pause au bout de 5 combats : au-delà, tu perds plus."))
     if mo:
         (n1, (g1, p1)), (n2, (g2, p2)) = mo
         txt.append(f"Ton meilleur créneau : {n1} (`{100 * p1:.0f}%`, {g1} combats) · le moins bon : {n2} (`{100 * p2:.0f}%`, {g2})")
@@ -545,7 +564,7 @@ def construire(tag):
         montees = cartes_a_monter(dp, profil, stats, p0) if dp else []
         if montees:
             sections4.append("**⬆️ À monter en priorité** (dans ton deck) : " + ", ".join(f"{n} (niv. {niv}/16)" for _, n, niv in montees))
-            priorites.append(f"**Niveaux** : monte d'abord {montees[0][1]} (niv. {montees[0][2]}/16), c'est la carte de ton deck qui te coûte le plus en puissance.")
+            priorites.append(f"**Niveaux** : " + v(f"monte d'abord {montees[0][1]} (niv. {montees[0][2]}/16), c'est la carte de ton deck qui te coûte le plus en puissance.", f"commence par {montees[0][1]} (niv. {montees[0][2]}/16) : c'est ta carte la plus en retard.", f"{montees[0][1]} (niv. {montees[0][2]}/16) est ta priorité : le plus gros gain de puissance."))
         ids_dp = [x["id"] for x in dp["cartes"]] if dp else []
         evo_dp = [(x.get("evolutionLevel") or 0) > 0 for x in dp["cartes"]] if dp else []
         slots_dp = [1 if e else 0 for e in evo_dp]
