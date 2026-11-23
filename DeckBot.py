@@ -104,6 +104,16 @@ BATIMENTS = {
     "Furnace", "Elixir Collector", "Goblin Cage",
 }
 
+# Cartes capables de toucher les airs (troupes, bâtiments, sorts) : un deck en a besoin d'au moins 2
+ANTI_AIR = {
+    "Musketeer", "Archers", "Mega Minion", "Minions", "Minion Horde", "Bats", "Baby Dragon", "Inferno Dragon",
+    "Electro Dragon", "Electro Wizard", "Wizard", "Witch", "Ice Wizard", "Princess", "Dart Goblin", "Flying Machine",
+    "Hunter", "Executioner", "Tesla", "Inferno Tower", "Firecracker", "Magic Archer", "Night Witch", "Sparky",
+    "Three Musketeers", "Spear Goblins", "Goblin Gang", "Zappies", "Archer Queen", "Little Prince", "Phoenix",
+    "Fireball", "Arrows", "Zap", "Lightning", "Poison", "Rocket", "Tornado", "Giant Snowball", "Void",
+}
+MIN_ANTI_AIR = 2
+
 # Noms français des cartes (l'API ne les donne qu'en anglais).
 # Une carte absente de cette liste s'affiche en anglais : ajoute-la ici si besoin.
 NOMS_FR = {
@@ -314,10 +324,30 @@ def collecter(mode, tags, data, paires=None):
                 data["cards"][str(c["id"])] = [c.get("name", "?"), c.get("elixirCost") or 0]
             if paires is not None:
                 compter_paires(paires, jour, mode, sorted(c["id"] for c in cartes), c1 > c2)
+                compter_duel(jour, mode, cartes, adv.get("cards") or [], c1 > c2)
             nouveaux += 1
         if plus_recent:
             data["last"][tag] = plus_recent
     return nouveaux
+
+
+_DUELS_DU_JOUR = {}      # jour -> mode -> type de mon deck -> type du deck adverse -> [parties, victoires]
+
+
+def archetype(cartes):
+    """Type d'un deck = sa carte de victoire la plus chère (« Autre » s'il n'en a pas). cartes : [(nom, élixir)]."""
+    victoires = [(e or 0, n) for n, e in cartes if n in CARTES_VICTOIRE]
+    return max(victoires)[1] if victoires else "Autre"
+
+
+def compter_duel(jour, mode, moi, adv, victoire):
+    if mode not in ("classe", "voie"):
+        return
+    a = archetype([(c.get("name", "?"), c.get("elixirCost")) for c in moi])
+    b = archetype([(c.get("name", "?"), c.get("elixirCost")) for c in adv])
+    e = _DUELS_DU_JOUR.setdefault(jour, {}).setdefault(mode, {}).setdefault(a, {}).setdefault(b, [0, 0])
+    e[0] += 1
+    e[1] += 1 if victoire else 0
 
 
 _DECKS_DU_JOUR = {}      # decks vus pendant cette collecte : jour -> mode -> "id,id,..." -> [parties, victoires]
@@ -330,6 +360,7 @@ def charger_decks():
     except (OSError, ValueError):
         data = {}
     data.setdefault("days", {})
+    data.setdefault("duels", {})
     return data
 
 
@@ -344,11 +375,21 @@ def sauver_decks():
                 e[0] += g
                 e[1] += w
     _DECKS_DU_JOUR.clear()
+    for jour, modes in _DUELS_DU_JOUR.items():
+        for mode, mes in modes.items():
+            for a, advs in mes.items():
+                for b, (g, w) in advs.items():
+                    e = data["duels"].setdefault(jour, {}).setdefault(mode, {}).setdefault(a, {}).setdefault(b, [0, 0])
+                    e[0] += g
+                    e[1] += w
+    _DUELS_DU_JOUR.clear()
     aujourdhui = aujourdhui_utc()
     limite = (aujourdhui - datetime.timedelta(days=FENETRE_DECKS_JOURS)).strftime("%Y-%m-%d")
     allege = (aujourdhui - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
     for jour in [j for j in data["days"] if j < limite]:
         del data["days"][jour]
+    for jour in [j for j in data["duels"] if j < limite]:
+        del data["duels"][jour]
     for jour, modes in data["days"].items():
         if jour < allege:
             for mode in modes:
@@ -360,11 +401,63 @@ def sauver_decks():
     print(f"Decks enregistrés : {sum(len(m) for j in data['days'].values() for m in j.values())} decks sur {len(data['days'])} jours")
 
 
+MIN_PARTIES_DUEL = 25            # un type de deck doit avoir 25 parties contre un adversaire pour qu'on en parle
+MIN_PARTIES_TYPE_ADV = 100       # et le type adverse doit être assez répandu
+
+
+def affrontements(arch, mode):
+    """Résultats d'un type de deck contre les types adverses les plus joués : [(adversaire, winrate, parties)]."""
+    total, miens = {}, {}
+    for jour in charger_decks()["duels"].values():
+        for a, advs in (jour.get(mode) or {}).items():
+            for b, (g, w) in advs.items():
+                total[b] = total.get(b, 0) + g
+                if a == arch:
+                    e = miens.setdefault(b, [0, 0])
+                    e[0] += g
+                    e[1] += w
+    courants = sorted((b for b, g in total.items() if g >= MIN_PARTIES_TYPE_ADV and b != "Autre"), key=lambda b: -total[b])[:6]
+    return [(b, miens[b][1] / miens[b][0], miens[b][0]) for b in courants if b in miens and miens[b][0] >= MIN_PARTIES_DUEL]
+
+
 def _wilson(g, w, z=1.96):
     if g == 0:
         return 0.0
     p = w / g
     return (p + z * z / (2 * g) - z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)) / (1 + z * z / g)
+
+
+MIN_PARTIES_MEILLEUR = 20        # pour proposer « le mieux classé » : au moins 20 parties
+ECART_MEILLEUR = 0.02            # et au moins 2 points de mieux que le deck proche
+
+
+def meilleur_deck_jouable(mode, profil, proche):
+    """Le deck le mieux classé chez les meilleurs joueurs que tu peux jouer avec tes niveaux (nécessite ton tag)."""
+    if not profil:
+        return None
+    decks = {}
+    for jour in charger_decks()["days"].values():
+        for cle, (g, w) in (jour.get(mode) or {}).items():
+            e = decks.setdefault(cle, [0, 0])
+            e[0] += g
+            e[1] += w
+    meilleur = None
+    for cle, (g, w) in decks.items():
+        if g < MIN_PARTIES_MEILLEUR:
+            continue
+        cartes = [int(x) for x in cle.split(",")]
+        if any(c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS for c in cartes):
+            continue
+        sc = _wilson(g, w)
+        if meilleur is None or sc > meilleur["score"]:
+            meilleur = {"cartes": cartes, "g": g, "w": w, "score": sc}
+    if not meilleur:
+        return None
+    if proche and meilleur["cartes"] == proche["cartes"]:
+        return None
+    if proche and meilleur["score"] < proche["score"] + ECART_MEILLEUR:
+        return None
+    return meilleur
 
 
 def deck_proche(ids, mode, profil):
@@ -696,6 +789,8 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
                 if abs((stats[entrant]["elixir"] or 0) - (stats[sortant]["elixir"] or 0)) > 1:
                     continue
                 nouveau = cartes[:pos] + [entrant] + cartes[pos + 1:]
+                if not coherent_apres_changement(cartes, nouveau, stats):
+                    continue
                 gain = note_deck(nouveau, stats, p0, profil) - base
                 sous_niveau = bool(profil) and sortant in profil and manque(profil[sortant]) >= NIVEAUX_MANQUANTS_ALERTE
                 if gain >= (GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK) and (meilleur is None or gain > meilleur[0]):
@@ -838,11 +933,30 @@ def decks_du_joueur(mode, tag):
     raise ValueError(f"Je ne trouve pas de deck pour {tag}. Vérifie ton tag, ou colle le lien « Copier le deck ».")
 
 
+def defense_aerienne(ids, stats):
+    """Nombre de cartes du deck capables de toucher les airs (None si les noms ne sont pas tous connus)."""
+    noms = [stats[i]["name"] for i in ids if i in stats]
+    if len(noms) < len(ids):
+        return None
+    return sum(1 for n in noms if n in ANTI_AIR)
+
+
+def coherent_apres_changement(avant, apres, stats):
+    """Un changement ne doit pas faire passer la défense aérienne sous le minimum ni l'aggraver."""
+    a, b = defense_aerienne(avant, stats), defense_aerienne(apres, stats)
+    if a is None or b is None:
+        return True
+    return b >= min(a, MIN_ANTI_AIR)
+
+
 def points_attention(ids, stats, profil):
     noms = [stats[i]["name"] for i in ids if i in stats]
     notes = []
     if noms and not any(n in CARTES_VICTOIRE for n in noms):
         notes.append("aucune carte de victoire détectée")
+    da = defense_aerienne(ids, stats)
+    if da is not None and da < MIN_ANTI_AIR:
+        notes.append("peu de défense contre les airs (Ballon, Meute de lave, dragons)")
     nb_sorts = sum(1 for n in noms if n in SORTS)
     if nb_sorts == 0:
         notes.append("aucun sort")
@@ -1075,6 +1189,22 @@ def construire_reponse(mode, decks, tag, devine):
                 txt += "\n⚠️ Il te manque ou tu as trop bas : " + ", ".join(nom_carte(i, False) for i in proche["manquantes"])
             txt += f"\n[📥 Copier ce deck]({lien_deck(proche['cartes'], slots_p, tt)})"
             sections.append("**🏅 Deck proche chez les meilleurs joueurs**\n" + txt)
+        top = meilleur_deck_jouable(mode, profil, proche)
+        if top:
+            lien_top = lien_deck(top["cartes"], [0] * 8, tt)
+            sections.append(f"**🏆 Le mieux classé que tu peux jouer** : `{100 * top['w'] / top['g']:.1f}%` de victoires sur {top['g']} parties\n"
+                            + ", ".join(nom_carte(i, False) for i in top["cartes"]) + f"\n[📥 Copier ce deck]({lien_top})")
+    if mode in ("classe", "voie"):
+        arch = archetype([(stats[i]["name"], stats[i].get("elixir")) for i in ids if i in stats])
+        duels = affrontements(arch, mode) if arch != "Autre" else []
+        if len(duels) >= 2:
+            meilleur, pire = max(duels, key=lambda x: x[1]), min(duels, key=lambda x: x[1])
+            if meilleur[0] != pire[0]:
+                txt = (f"Les decks de type **{nom_fr(arch)}** gagnent `{100 * meilleur[1]:.0f}%` contre **{nom_fr(meilleur[0])}** "
+                       f"et `{100 * pire[1]:.0f}%` contre **{nom_fr(pire[0])}**")
+                if pire[1] <= 0.47:
+                    txt += f"\n⚠️ Prépare une réponse aux decks {nom_fr(pire[0])}."
+                sections.append("**⚔️ Affrontements**\n" + txt)
     if profil:
         faibles = sorted((niveau_jeu(profil[i]), i) for i in ids if i in profil and manque(profil[i]) >= NIVEAUX_MANQUANTS_ALERTE)
         if faibles:
