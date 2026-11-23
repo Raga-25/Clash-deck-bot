@@ -240,17 +240,19 @@ def deck_avec_carte(ids, evo, carte_id, stats, p0, profil):
     meilleur = None
     for pos, i in enumerate(ids):
         s = stats.get(i)
-        if evo[pos] or not s or d.role(s["name"]) != d.role(cible["name"]) or abs(s.get("elixir", 0) - cible.get("elixir", 0)) > 2:
+        if not s or d.role(s["name"]) != d.role(cible["name"]) or abs(s.get("elixir", 0) - cible.get("elixir", 0)) > 2:
             continue
         nouveau = list(ids)
         nouveau[pos] = carte_id
         if not d.coherent_apres_changement(ids, nouveau, stats):
             continue
-        note = d.note_deck(nouveau, stats, p0, profil)
-        if meilleur is None or note > meilleur[3]:
-            meilleur = (nouveau, i, avant, note)
-    if meilleur is None or meilleur[3] < avant - 0.002:           # pas question de proposer un deck nettement moins bon
+        reelle = d.note_deck(nouveau, stats, p0, profil)
+        note = reelle - (d.EVO_PERTE if evo[pos] else 0.0)          # retirer une évolution coûte
+        if meilleur is None or note > meilleur[4]:
+            meilleur = (nouveau, i, avant, reelle, note)
+    if meilleur is None or meilleur[4] < avant - 0.002:           # pas question de proposer un deck nettement moins bon
         return None
+    meilleur = meilleur[:4]
     return meilleur
 
 
@@ -581,7 +583,7 @@ def construire(tag):
                     break
             if propose:
                 nom_c, niv_c, (nouveau, sortante, av, ap) = propose
-                lien = d.lien_deck(nouveau, slots_dp, getattr(d, "TT_DEFAUT", 159000000))
+                lien = d.lien_deck_ordonne(nouveau, [slots_dp[ids_dp.index(i)] if i in ids_dp else 0 for i in nouveau], getattr(d, "TT_DEFAUT", 159000000), stats, profil)
                 priorites.append(
                     f"**Essaie {nom_c}** (niv. {niv_c}/16) : elle gagne plus que la moyenne chez les meilleurs joueurs et tu l'as déjà à un bon niveau.\n"
                     f"🔁 {d.nom_fr(stats[sortante]['name'])} → **{nom_c}** · estimé `≈{100 * av:.1f}%` → `≈{100 * ap:.1f}%` "
