@@ -703,10 +703,10 @@ def lignes_synergie(ids, syn, mode, nom):
     res = []
     if paires and paires[-1][0] >= SEUIL_CITATION:
         v, a, b = paires[-1]
-        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (`{100 * v:+.1f}` pt)")
+        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (`{100 * min(v, PLAFOND_PAIRE):+.1f}` pt)")
     if paires and paires[0][0] <= -SEUIL_CITATION:
         v, a, b = paires[0]
-        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * v:+.1f}` pt)")
+        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * max(v, -PLAFOND_PAIRE):+.1f}` pt)")
     return res
 
 
@@ -1239,7 +1239,10 @@ def construire_reponse(mode, decks, tag, devine):
         if bm and set(bm["cartes"]) != set(ids) and bm["note"] >= score - 0.003:
             lig = [f"Inspiré d'un deck à `{100 * bm['w'] / bm['g']:.1f}%` de victoires chez les meilleurs ({bm['g']} parties), "
                    "avec uniquement des cartes que tu as au niveau 15-16"]
-            lig += [f"🔁 {nom_carte(a, False)} → **{nom_carte(b, False)}**" for a, b in bm["echanges"]] or ["Aucune carte à remplacer."]
+            lui, moi = set(bm["cartes"]), set(ids)
+            sortent = [nom_carte(i, False) for i in ids if i not in lui]
+            entrent = [nom_carte(i, False) for i in bm["cartes"] if i not in moi]
+            lig.append(f"🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
             lig.append(f"📊 estimé `≈{100 * bm['note']:.1f}%` (ton deck : `≈{100 * score:.1f}%`)")
             lig.append(f"[📥 Copier ce deck]({lien_deck(bm['cartes'], [0] * 8, tt)})")
             sections.append("**💪 Version bien montée**\n" + "\n".join(lig))
