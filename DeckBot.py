@@ -427,6 +427,8 @@ def _wilson(g, w, z=1.96):
     return (p + z * z / (2 * g) - z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)) / (1 + z * z / g)
 
 
+MIN_PARTIES_BIEN_MONTE = 12      # deck « bien monté » : un deck gagnant d'au moins 12 parties...
+NIVEAUX_MANQUANTS_BIEN_MONTE = 1 # ...dont on ne garde que les cartes que tu as au niveau 15 ou 16 (le reste est remplacé)
 MIN_PARTIES_MEILLEUR = 20        # pour proposer « le mieux classé » : au moins 20 parties
 ECART_MEILLEUR = 0.02            # et au moins 2 points de mieux que le deck proche
 
@@ -457,6 +459,44 @@ def meilleur_deck_jouable(mode, profil, proche):
         return None
     if proche and meilleur["score"] < proche["score"] + ECART_MEILLEUR:
         return None
+    return meilleur
+
+
+def deck_bien_monte(mode, profil, stats, p0):
+    """Un deck gagnant des meilleurs joueurs reconstruit avec des cartes que tu as au niveau 15-16 :
+    les cartes pas assez montées sont remplacées par la meilleure carte du même rôle que tu as bien montée."""
+    if not profil:
+        return None
+    decks = {}
+    for jour in charger_decks()["days"].values():
+        for cle, (g, w) in (jour.get(mode) or {}).items():
+            e = decks.setdefault(cle, [0, 0])
+            e[0] += g
+            e[1] += w
+    en_vue = sorted(((_wilson(g, w), cle, g, w) for cle, (g, w) in decks.items() if g >= MIN_PARTIES_BIEN_MONTE), reverse=True)[:40]
+    pool = {i for i, c in profil.items() if manque(c) <= NIVEAUX_MANQUANTS_BIEN_MONTE and i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE}
+    meilleur = None
+    for _, cle, g, w in en_vue:
+        cartes = [int(x) for x in cle.split(",")]
+        if any(c not in stats for c in cartes):
+            continue
+        nouveau, echanges = list(cartes), []
+        for pos, c in enumerate(cartes):
+            if c in pool:
+                continue
+            candidats = [e for e in pool if e not in nouveau and role(stats[e]["name"]) == role(stats[c]["name"])
+                         and abs((stats[e]["elixir"] or 0) - (stats[c]["elixir"] or 0)) <= 1]
+            if not candidats:
+                nouveau = None
+                break
+            e = max(candidats, key=lambda x: note_deck(nouveau[:pos] + [x] + nouveau[pos + 1:], stats, p0, profil))
+            echanges.append((c, e))
+            nouveau[pos] = e
+        if nouveau is None or not coherent_apres_changement(cartes, nouveau, stats):
+            continue
+        note = note_deck(nouveau, stats, p0, profil)
+        if meilleur is None or note > meilleur["note"]:
+            meilleur = {"cartes": nouveau, "echanges": echanges, "note": note, "g": g, "w": w}
     return meilleur
 
 
@@ -1194,6 +1234,15 @@ def construire_reponse(mode, decks, tag, devine):
             lien_top = lien_deck(top["cartes"], [0] * 8, tt)
             sections.append(f"**🏆 Le mieux classé que tu peux jouer** : `{100 * top['w'] / top['g']:.1f}%` de victoires sur {top['g']} parties\n"
                             + ", ".join(nom_carte(i, False) for i in top["cartes"]) + f"\n[📥 Copier ce deck]({lien_top})")
+    if mode in ("classe", "voie") and profil:
+        bm = deck_bien_monte(mode, profil, stats, p0)
+        if bm and set(bm["cartes"]) != set(ids) and bm["note"] >= score - 0.003:
+            lig = [f"Inspiré d'un deck à `{100 * bm['w'] / bm['g']:.1f}%` de victoires chez les meilleurs ({bm['g']} parties), "
+                   "avec uniquement des cartes que tu as au niveau 15-16"]
+            lig += [f"🔁 {nom_carte(a, False)} → **{nom_carte(b, False)}**" for a, b in bm["echanges"]] or ["Aucune carte à remplacer."]
+            lig.append(f"📊 estimé `≈{100 * bm['note']:.1f}%` (ton deck : `≈{100 * score:.1f}%`)")
+            lig.append(f"[📥 Copier ce deck]({lien_deck(bm['cartes'], [0] * 8, tt)})")
+            sections.append("**💪 Version bien montée**\n" + "\n".join(lig))
     if mode in ("classe", "voie"):
         arch = archetype([(stats[i]["name"], stats[i].get("elixir")) for i in ids if i in stats])
         duels = affrontements(arch, mode) if arch != "Autre" else []
