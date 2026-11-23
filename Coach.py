@@ -244,6 +244,8 @@ def deck_avec_carte(ids, evo, carte_id, stats, p0, profil):
             continue
         nouveau = list(ids)
         nouveau[pos] = carte_id
+        if not d.coherent_apres_changement(ids, nouveau, stats):
+            continue
         note = d.note_deck(nouveau, stats, p0, profil)
         if meilleur is None or note > meilleur[3]:
             meilleur = (nouveau, i, avant, note)
