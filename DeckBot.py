@@ -65,6 +65,7 @@ LISSAGE = 100                      # lissage du winrate des cartes
 MAX_NIVEAUX_MANQUANTS = 3          # on ne conseille pas une carte à plus de 3 niveaux du max
 NB_CHANGEMENTS = 2                 # au plus 2 cartes changées
 GAIN_MINIMUM = 0.004               # gain estimé minimum (0,4 point) pour remplacer une carte très sous-niveau
+EVO_PERTE = 0.01                 # retirer une carte en évolution coûte 1 point d'estimation du deck : il faut que le deck soit vraiment mieux
 GAIN_MINIMUM_NIVEAU_OK = 0.012     # pour remplacer une carte correctement montée : il faut un vrai gain (1,2 point), pas un détail
 PENALITE_NIVEAU = 0.008            # estimation : -0,8 point par niveau manquant et par carte (avant moyenne sur 8 cartes)
 PENALITE_NIVEAU_EXTRA = 0.006      # en plus, -0,6 point par niveau manquant au-delà de 4 (une carte très sous-niveau s'effondre)
@@ -433,7 +434,7 @@ MIN_PARTIES_MEILLEUR = 20        # pour proposer « le mieux classé » : au moi
 ECART_MEILLEUR = 0.02            # et au moins 2 points de mieux que le deck proche
 
 
-def meilleur_deck_jouable(mode, profil, proche):
+def meilleur_deck_jouable(mode, profil, proche, evo_ids=frozenset()):
     """Le deck le mieux classé chez les meilleurs joueurs que tu peux jouer avec tes niveaux (nécessite ton tag)."""
     if not profil:
         return None
@@ -450,9 +451,10 @@ def meilleur_deck_jouable(mode, profil, proche):
         cartes = [int(x) for x in cle.split(",")]
         if any(c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS for c in cartes):
             continue
-        sc = _wilson(g, w)
+        perdues = [c for c in evo_ids if c not in cartes]
+        sc = _wilson(g, w) - EVO_PERTE * len(perdues)
         if meilleur is None or sc > meilleur["score"]:
-            meilleur = {"cartes": cartes, "g": g, "w": w, "score": sc}
+            meilleur = {"cartes": cartes, "g": g, "w": w, "score": sc, "perdues": perdues}
     if not meilleur:
         return None
     if proche and meilleur["cartes"] == proche["cartes"]:
@@ -462,7 +464,7 @@ def meilleur_deck_jouable(mode, profil, proche):
     return meilleur
 
 
-def deck_bien_monte(mode, profil, stats, p0):
+def deck_bien_monte(mode, profil, stats, p0, evo_ids=frozenset()):
     """Un deck gagnant des meilleurs joueurs reconstruit avec des cartes que tu as au niveau 15-16 :
     les cartes pas assez montées sont remplacées par la meilleure carte du même rôle que tu as bien montée."""
     if not profil:
@@ -494,13 +496,14 @@ def deck_bien_monte(mode, profil, stats, p0):
             nouveau[pos] = e
         if nouveau is None or not coherent_apres_changement(cartes, nouveau, stats):
             continue
-        note = note_deck(nouveau, stats, p0, profil)
+        perdues = [c for c in evo_ids if c not in nouveau]
+        note = note_deck(nouveau, stats, p0, profil) - EVO_PERTE * len(perdues)
         if meilleur is None or note > meilleur["note"]:
-            meilleur = {"cartes": nouveau, "echanges": echanges, "note": note, "g": g, "w": w}
+            meilleur = {"cartes": nouveau, "echanges": echanges, "note": note, "g": g, "w": w, "perdues": perdues}
     return meilleur
 
 
-def deck_proche(ids, mode, profil):
+def deck_proche(ids, mode, profil, evo_ids=frozenset()):
     """Le deck des meilleurs joueurs le plus proche du tien (au moins 5 cartes communes), que tu peux jouer avec tes niveaux.
     Renvoie (deck, tes_stats) ; deck = {cartes, g, w, communes, manquantes} ou None."""
     decks = {}
@@ -520,7 +523,9 @@ def deck_proche(ids, mode, profil):
         if communes < MIN_CARTES_COMMUNES:
             continue
         manquantes = [c for c in cartes if profil and (c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS)]
-        candidats.append({"cartes": cartes, "g": g, "w": w, "communes": communes, "manquantes": manquantes, "score": _wilson(g, w)})
+        perdues = [c for c in evo_ids if c not in cartes]
+        candidats.append({"cartes": cartes, "g": g, "w": w, "communes": communes, "manquantes": manquantes,
+                          "perdues": perdues, "score": _wilson(g, w) - EVO_PERTE * len(perdues)})
     if not candidats:
         return None, decks.get(cle_moi)
     jouables = [c for c in candidats if not c["manquantes"]] or candidats
@@ -821,7 +826,7 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
         base = note_deck(cartes, stats, p0, profil)
         meilleur = None
         for pos, sortant in enumerate(cartes):
-            if evo[pos] or sortant not in stats:
+            if sortant not in stats:
                 continue
             for entrant in pool:
                 if role(stats[entrant]["name"]) != role(stats[sortant]["name"]):
@@ -833,12 +838,15 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
                     continue
                 gain = note_deck(nouveau, stats, p0, profil) - base
                 sous_niveau = bool(profil) and sortant in profil and manque(profil[sortant]) >= NIVEAUX_MANQUANTS_ALERTE
-                if gain >= (GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK) and (meilleur is None or gain > meilleur[0]):
-                    meilleur = (gain, pos, sortant, entrant)
+                net = gain - (EVO_PERTE if evo[pos] else 0.0)
+                if net >= (GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK) and (meilleur is None or net > meilleur[0]):
+                    meilleur = (net, pos, sortant, entrant)
         if not meilleur:
             break
         _, pos, sortant, entrant = meilleur
         cartes[pos] = entrant
+        evo = list(evo)
+        evo[pos] = False
         pool.discard(entrant)
         changements.append((sortant, entrant))
     return cartes, changements
@@ -1105,6 +1113,29 @@ def lire_demande(contenu):
     return mode, decks[:4], tag, devine
 
 
+CHAMPIONS = {"Little Prince", "Archer Queen", "Golden Knight", "Skeleton King", "Mighty Miner", "Monk",
+             "Boss Bandit", "Spirit Empress", "Goblin Machine", "Goblinstein"}
+
+
+def est_champion(cid, stats, profil):
+    nom = (stats.get(cid) or {}).get("name") or ((profil or {}).get(cid) or {}).get("name") or ""
+    rarete = str(((profil or {}).get(cid) or {}).get("rarity", "")).lower()
+    return nom in CHAMPIONS or rarete == "champion"
+
+
+def lien_deck_ordonne(cartes, slots, tt, stats, profil):
+    """Lien « Copier le deck » valide : les cartes à évolution gardent les deux premiers emplacements (avec leur drapeau),
+    et le champion (Petit prince...) est placé en 3ᵉ position, sinon le jeu refuse de coller le deck."""
+    slot_de = {c: (slots[p] if p < len(slots) else 0) for p, c in enumerate(cartes)}
+    champ = [c for c in cartes if est_champion(c, stats, profil)][:1]
+    speciaux = [c for c in cartes if slot_de.get(c) and c not in champ][:2]
+    autres = [c for c in cartes if c not in speciaux and c not in champ]
+    ordre = speciaux + autres
+    for c in champ:
+        ordre.insert(min(2, len(ordre)), c)
+    return lien_deck(ordre, [slot_de.get(c, 0) for c in ordre], tt)
+
+
 def lien_deck(ids, slots, tt):
     lien = f"https://link.clashroyale.com/fr?clashroyale://copyDeck?deck={';'.join(str(i) for i in ids)}"
     lien += f"&slots={';'.join(str(s) for s in slots)}"
@@ -1172,6 +1203,8 @@ def construire_reponse(mode, decks, tag, devine):
 
     score = note_deck(ids, stats, p0, profil)
     el_avant = elixir_moyen(ids, stats, profil)
+    evo_de = {i: slots[p] for p, i in enumerate(ids)}
+    evo_ids = {i for i, v in evo_de.items() if v}          # tes évolutions : retirées seulement si le deck est nettement mieux sans
     nouveau, changements = ameliorer(ids, evo, stats, p0, profil, exclues)
     score_apres = note_deck(nouveau, stats, p0, profil)
 
@@ -1203,39 +1236,42 @@ def construire_reponse(mode, decks, tag, devine):
     if changements:
         lig = []
         for sortant, entrant in changements:
-            lig.append(f"🔁 {nom_carte(sortant)} → **{nom_carte(entrant)}**")
+            lig.append(f"🔁 {nom_carte(sortant)}{' (évolution retirée)' if sortant in evo_ids else ''} → **{nom_carte(entrant)}**")
         el_apres = elixir_moyen(nouveau, stats, profil)
         nouveaux_slots = [0 if nouveau[p] != ids[p] else slots[p] for p in range(8)]
         sections.append("**🔧 Améliorations proposées**\n" + "\n".join(lig)
                         + f"\n📊 estimé `≈{100 * score:.1f}%` → `≈{100 * score_apres:.1f}%`"
                         + f"\n⚡ élixir `{el_avant:.1f}` → `{el_apres:.1f}`"
-                        + f"\n[📥 Copier le deck amélioré]({lien_deck(nouveau, nouveaux_slots, tt)})"
+                        + f"\n[📥 Copier le deck amélioré]({lien_deck_ordonne(nouveau, nouveaux_slots, tt, stats, profil)})"
                         + ("" if profil else "\n-# Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
     else:
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
     if mode in ("classe", "voie"):
-        proche, mon = deck_proche(ids, mode, profil)
+        proche, mon = deck_proche(ids, mode, profil, evo_ids)
         if proche:
             lui = set(proche["cartes"])
             sortent = [nom_carte(i, False) for i in ids if i not in lui]
             entrent = [nom_carte(i, False) for i in proche["cartes"] if i not in set(ids)]
-            evo_de = {i: slots[p] for p, i in enumerate(ids)}
             slots_p = [evo_de.get(i, 0) for i in proche["cartes"]]
             txt = (f"Le deck des meilleurs joueurs le plus proche du tien : `{100 * proche['w'] / proche['g']:.1f}%` de victoires "
                    f"sur {proche['g']} parties ({proche['communes']} cartes en commun)\n🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
             if mon and mon[0] >= MIN_PARTIES_DECK:
                 txt += f"\nTon deck exact chez les meilleurs : `{100 * mon[1] / mon[0]:.1f}%` sur {mon[0]} parties"
+            if proche["perdues"]:
+                txt += "\n⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in proche["perdues"])
             if proche["manquantes"]:
                 txt += "\n⚠️ Il te manque ou tu as trop bas : " + ", ".join(nom_carte(i, False) for i in proche["manquantes"])
-            txt += f"\n[📥 Copier ce deck]({lien_deck(proche['cartes'], slots_p, tt)})"
+            txt += f"\n[📥 Copier ce deck]({lien_deck_ordonne(proche['cartes'], slots_p, tt, stats, profil)})"
             sections.append("**🏅 Deck proche chez les meilleurs joueurs**\n" + txt)
-        top = meilleur_deck_jouable(mode, profil, proche)
+        top = meilleur_deck_jouable(mode, profil, proche, evo_ids)
         if top:
-            lien_top = lien_deck(top["cartes"], [0] * 8, tt)
+            lien_top = lien_deck_ordonne(top["cartes"], [evo_de.get(i, 0) for i in top["cartes"]], tt, stats, profil)
             sections.append(f"**🏆 Le mieux classé que tu peux jouer** : `{100 * top['w'] / top['g']:.1f}%` de victoires sur {top['g']} parties\n"
-                            + ", ".join(nom_carte(i, False) for i in top["cartes"]) + f"\n[📥 Copier ce deck]({lien_top})")
+                            + ", ".join(nom_carte(i, False) for i in top["cartes"])
+                            + ("\n⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in top["perdues"]) if top["perdues"] else "")
+                            + f"\n[📥 Copier ce deck]({lien_top})")
     if mode in ("classe", "voie") and profil:
-        bm = deck_bien_monte(mode, profil, stats, p0)
+        bm = deck_bien_monte(mode, profil, stats, p0, evo_ids)
         if bm and set(bm["cartes"]) != set(ids) and bm["note"] >= score - 0.003:
             lig = [f"Inspiré d'un deck à `{100 * bm['w'] / bm['g']:.1f}%` de victoires chez les meilleurs ({bm['g']} parties), "
                    "avec uniquement des cartes que tu as au niveau 15-16"]
@@ -1243,8 +1279,10 @@ def construire_reponse(mode, decks, tag, devine):
             sortent = [nom_carte(i, False) for i in ids if i not in lui]
             entrent = [nom_carte(i, False) for i in bm["cartes"] if i not in moi]
             lig.append(f"🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
-            lig.append(f"📊 estimé `≈{100 * bm['note']:.1f}%` (ton deck : `≈{100 * score:.1f}%`)")
-            lig.append(f"[📥 Copier ce deck]({lien_deck(bm['cartes'], [0] * 8, tt)})")
+            if bm["perdues"]:
+                lig.append("⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in bm["perdues"]))
+            lig.append(f"📊 estimé `≈{100 * (bm['note'] + EVO_PERTE * len(bm['perdues'])):.1f}%` (ton deck : `≈{100 * score:.1f}%`)")
+            lig.append(f"[📥 Copier ce deck]({lien_deck_ordonne(bm['cartes'], [evo_de.get(i, 0) for i in bm['cartes']], tt, stats, profil)})")
             sections.append("**💪 Version bien montée**\n" + "\n".join(lig))
     if mode in ("classe", "voie"):
         arch = archetype([(stats[i]["name"], stats[i].get("elixir")) for i in ids if i in stats])
@@ -1319,7 +1357,7 @@ def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source, note
         note_av, note_ap = note_deck(ids_liste[k], stats, p0, profil), note_deck(deck, stats, p0, profil)
         bloc = f"**Deck {k + 1}** · `≈{100 * note_av:.1f}%` → `≈{100 * note_ap:.1f}%` · ⚡ `{el_av:.1f}` → `{el_ap:.1f}`\n"
         bloc += "\n".join(lignes) if lignes else "✅ inchangé"
-        bloc += f"\n[📥 Copier le deck {k + 1}]({lien_deck(deck, slots, decks[k][2])})"
+        bloc += f"\n[📥 Copier le deck {k + 1}]({lien_deck_ordonne(deck, slots, decks[k][2], stats, profil)})"
         sections.append(bloc)
     if autres:
         sections.append("**🛡️ Decks retrouvés dans ton historique** (non modifiés)\n"
