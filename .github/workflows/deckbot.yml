@@ -5,15 +5,17 @@ on:
     - cron: '*/5 * * * *'    # toutes les 5 minutes : lit le salon et répond aux demandes
     - cron: '20 */6 * * *'   # toutes les 6 heures : enregistre les stats des cartes et des paires de cartes
     - cron: '50 5 * * 1'     # lundi 5h50 UTC : calcule les synergies (synergies.json)
+    - cron: '40 4,16 * * *'  # deux fois par jour : met à jour l'historique des combats des joueurs du coach
   workflow_dispatch:
     inputs:
       mode:
-        description: "repondre = lire le salon et répondre | collect = enregistrer les stats | synergies = recalculer synergies.json"
+        description: "repondre = lire le salon et répondre | collect = enregistrer les stats | synergies = recalculer synergies.json | historique = mettre à jour l'historique du coach"
         type: choice
         options:
           - repondre
           - collect
           - synergies
+          - historique
         default: repondre
 
 # Autorise le workflow à enregistrer les fichiers de données dans le dépôt
@@ -54,6 +56,8 @@ jobs:
             echo "mode=collect" >> "$GITHUB_OUTPUT"
           elif [ "$SCHEDULE" = "50 5 * * 1" ]; then
             echo "mode=synergies" >> "$GITHUB_OUTPUT"
+          elif [ "$SCHEDULE" = "40 4,16 * * *" ]; then
+            echo "mode=historique" >> "$GITHUB_OUTPUT"
           else
             echo "mode=repondre" >> "$GITHUB_OUTPUT"
           fi
@@ -63,20 +67,28 @@ jobs:
           CR_API_KEY: ${{ secrets.CR_API_KEY }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-        run: python DeckBot.py "${{ steps.tache.outputs.mode }}"
+        run: |
+          if [ "${{ steps.tache.outputs.mode }}" = "historique" ]; then
+            python Coach.py historique
+          else
+            python DeckBot.py "${{ steps.tache.outputs.mode }}"
+          fi
 
       - name: Sauvegarde des données
-        if: always() && (steps.tache.outputs.mode == 'collect' || steps.tache.outputs.mode == 'synergies')
+        if: always() && (steps.tache.outputs.mode == 'collect' || steps.tache.outputs.mode == 'synergies' || steps.tache.outputs.mode == 'historique')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for f in data_gdc.json data_classe.json data_voie.json data_paires.json data_decks.json synergies.json; do
             if [ -f "$f" ]; then git add "$f"; fi
           done
+          if [ -d historique ]; then git add -A historique; fi
           if ! git diff --cached --quiet; then
-            git commit -m "Données des cartes et synergies"
-            git pull --rebase
-            git push
+            git commit -m "Données des cartes, synergies et historique"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              sleep 5
+            done
           fi
 
       - name: Alerte en cas d'erreur
