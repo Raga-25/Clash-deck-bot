@@ -8,9 +8,10 @@ Utilisation dans le salon (le « !deck » est facultatif : coller directement le
 Le lien est celui que donne le jeu en appuyant sur « Copier le deck » (il contient aussi le tag du joueur :
 le bot en déduit le niveau de ses cartes).
 
-Deux modes de lancement (voir deckbot.yml) :
+Trois modes de lancement (voir deckbot.yml) :
   python DeckBot.py repondre   lit le salon, répond aux nouvelles demandes (toutes les 5 minutes)
   python DeckBot.py collect    enregistre les stats des cartes chez les meilleurs joueurs (toutes les 6 heures)
+  python DeckBot.py synergies  calcule synergies.json à partir de data_paires.json (chaque lundi)
 
 Variables d'environnement :
   CR_API_KEY          clé API Clash Royale (liée à l'IP du proxy RoyaleAPI)
@@ -39,7 +40,7 @@ DOSSIER = os.environ.get("DECKBOT_DIR", ".")
 API_BASE = "https://proxy.royaleapi.dev/v1"
 DISCORD_API = "https://discord.com/api/v10"
 
-NB_JOUEURS = 100                   # joueurs lus pour le classé et la voie des trophées
+NB_JOUEURS = 150                   # joueurs lus pour le classé et la voie des trophées
 NB_CLANS = 20                      # meilleurs clans de guerre dont on lit les membres
 LOCALISATION_FRANCE = 57000087     # classement de secours (France)
 
@@ -78,7 +79,7 @@ FICHIER_PAIRES = "data_paires.json"
 FICHIER_SYNERGIES = "synergies.json"
 FICHIER_DECKS = "data_decks.json"      # decks complets des meilleurs joueurs (classé et voie) : parties et victoires par jour
 FENETRE_DECKS_JOURS = 10
-MIN_PARTIES_DECK = 8                   # un deck doit avoir au moins 8 parties pour être proposé
+MIN_PARTIES_DECK = 10                  # un deck doit avoir au moins 10 parties pour être proposé
 MIN_CARTES_COMMUNES = 5                # et partager au moins 5 cartes avec le tien
 FENETRE_PAIRES_JOURS = 21          # les paires des 21 derniers jours comptent
 MIN_PARTIES_PAIRE = 150            # une paire doit avoir au moins 150 parties (tous modes) pour compter
@@ -109,9 +110,10 @@ BATIMENTS = {
 ANTI_AIR = {
     "Musketeer", "Archers", "Mega Minion", "Minions", "Minion Horde", "Bats", "Baby Dragon", "Inferno Dragon",
     "Electro Dragon", "Electro Wizard", "Wizard", "Witch", "Ice Wizard", "Princess", "Dart Goblin", "Flying Machine",
-    "Hunter", "Executioner", "Tesla", "Inferno Tower", "Firecracker", "Magic Archer", "Night Witch", "Sparky",
+    "Hunter", "Executioner", "Tesla", "Inferno Tower", "Firecracker", "Magic Archer", "Night Witch",
     "Three Musketeers", "Spear Goblins", "Goblin Gang", "Zappies", "Archer Queen", "Little Prince", "Phoenix",
-    "Fireball", "Arrows", "Zap", "Lightning", "Poison", "Rocket", "Tornado", "Giant Snowball", "Void",
+    "Skeleton Dragons", "Mother Witch",
+    "Fireball", "Arrows", "Zap", "Lightning", "Poison", "Giant Snowball", "Void",
 }
 MIN_ANTI_AIR = 2
 
@@ -160,7 +162,7 @@ NOMS_FR = {
     "Graveyard": "Cimetière", "The Log": "La Bûche", "Tornado": "Tornade", "Clone": "Clone",
     "Earthquake": "Séisme", "Barbarian Barrel": "Tonneau de barbares",
     "Heal Spirit": "Esprit guérisseur", "Giant Snowball": "Boule de neige géante",
-    "Royal Delivery": "Livraison royale", "Void": "Néant", "Goblin Curse": "Malédiction gobelin",
+    "Royal Delivery": "Livraison royale", "Void": "Néant", "Goblin Curse": "Malédiction gobelin", "Goblinstein": "Goblinstein",
 }
 
 
@@ -326,10 +328,38 @@ def collecter(mode, tags, data, paires=None):
             if paires is not None:
                 compter_paires(paires, jour, mode, sorted(c["id"] for c in cartes), c1 > c2)
                 compter_duel(jour, mode, cartes, adv.get("cards") or [], c1 > c2)
+                compter_formes(jour, mode, cartes, c1 > c2)
             nouveaux += 1
         if plus_recent:
             data["last"][tag] = plus_recent
     return nouveaux
+
+
+_FORMES_DU_JOUR = {}     # jour -> mode -> id carte -> "n" / "e" / "h" -> [parties, victoires]
+_CLES_CARTES = set()     # champs vus sur les cartes des combats (pour vérifier comment l'API note les héros)
+FORME_MIN_PARTIES = 30   # il faut 30 parties dans une forme (et en forme normale) pour comparer
+K_FORME = 100            # lissage : l'écart observé compte pour n / (n + 100)
+
+
+def forme_carte(c):
+    """'e' = jouée en évolution, 'h' = en héros, 'n' = normale (d'après les champs de la carte dans le combat)."""
+    if (c.get("evolutionLevel") or 0) > 0:
+        return "e"
+    if any("hero" in k.lower() and not isinstance(v, (dict, list)) and v for k, v in c.items()):
+        return "h"
+    return "n"
+
+
+def compter_formes(jour, mode, cartes, victoire):
+    if mode not in ("classe", "voie"):
+        return
+    for c in cartes:
+        if "id" not in c:
+            continue
+        _CLES_CARTES.update(c.keys())
+        e = _FORMES_DU_JOUR.setdefault(jour, {}).setdefault(mode, {}).setdefault(str(c["id"]), {}).setdefault(forme_carte(c), [0, 0])
+        e[0] += 1
+        e[1] += 1 if victoire else 0
 
 
 _DUELS_DU_JOUR = {}      # jour -> mode -> type de mon deck -> type du deck adverse -> [parties, victoires]
@@ -362,6 +392,7 @@ def charger_decks():
         data = {}
     data.setdefault("days", {})
     data.setdefault("duels", {})
+    data.setdefault("formes", {})
     return data
 
 
@@ -384,6 +415,16 @@ def sauver_decks():
                     e[0] += g
                     e[1] += w
     _DUELS_DU_JOUR.clear()
+    for jour, modes in _FORMES_DU_JOUR.items():
+        for mode, cartes in modes.items():
+            for cid, formes in cartes.items():
+                for f, (g, w) in formes.items():
+                    e = data["formes"].setdefault(jour, {}).setdefault(mode, {}).setdefault(cid, {}).setdefault(f, [0, 0])
+                    e[0] += g
+                    e[1] += w
+    _FORMES_DU_JOUR.clear()
+    if _CLES_CARTES:
+        print("Champs vus sur les cartes des combats : " + ", ".join(sorted(_CLES_CARTES)))
     aujourdhui = aujourdhui_utc()
     limite = (aujourdhui - datetime.timedelta(days=FENETRE_DECKS_JOURS)).strftime("%Y-%m-%d")
     allege = (aujourdhui - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
@@ -391,6 +432,8 @@ def sauver_decks():
         del data["days"][jour]
     for jour in [j for j in data["duels"] if j < limite]:
         del data["duels"][jour]
+    for jour in [j for j in data["formes"] if j < limite]:
+        del data["formes"][jour]
     for jour, modes in data["days"].items():
         if jour < allege:
             for mode in modes:
@@ -428,13 +471,27 @@ def _wilson(g, w, z=1.96):
     return (p + z * z / (2 * g) - z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)) / (1 + z * z / g)
 
 
-MIN_PARTIES_BIEN_MONTE = 12      # deck « bien monté » : un deck gagnant d'au moins 12 parties...
+MIN_PARTIES_BIEN_MONTE = 15      # deck « bien monté » : un deck gagnant d'au moins 15 parties...
 NIVEAUX_MANQUANTS_BIEN_MONTE = 1 # ...dont on ne garde que les cartes que tu as au niveau 15 ou 16 (le reste est remplacé)
-MIN_PARTIES_MEILLEUR = 20        # pour proposer « le mieux classé » : au moins 20 parties
+MIN_PARTIES_MEILLEUR = 25        # pour proposer « le mieux classé » : au moins 25 parties
+MAX_NIVEAUX_MEILLEUR = 2         # et seulement avec des cartes à 2 niveaux ou moins du max
 ECART_MEILLEUR = 0.02            # et au moins 2 points de mieux que le deck proche
 
 
-def meilleur_deck_jouable(mode, profil, proche, evo_ids=frozenset()):
+def deck_coherent(cartes, stats):
+    """Un deck proposé doit tenir debout : assez de défense aérienne et un élixir moyen raisonnable."""
+    da = defense_aerienne(cartes, stats)
+    if da is not None and da < MIN_ANTI_AIR:
+        return False
+    couts = [stats[i]["elixir"] for i in cartes if i in stats and stats[i].get("elixir")]
+    if len(couts) >= 7:
+        moy = sum(couts) / len(couts)
+        if moy < 2.4 or moy > 4.6:
+            return False
+    return True
+
+
+def meilleur_deck_jouable(mode, profil, proche, evo_ids=frozenset(), stats=None):
     """Le deck le mieux classé chez les meilleurs joueurs que tu peux jouer avec tes niveaux (nécessite ton tag)."""
     if not profil:
         return None
@@ -449,10 +506,12 @@ def meilleur_deck_jouable(mode, profil, proche, evo_ids=frozenset()):
         if g < MIN_PARTIES_MEILLEUR:
             continue
         cartes = [int(x) for x in cle.split(",")]
-        if any(c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS for c in cartes):
+        if any(c not in profil or manque(profil[c]) > MAX_NIVEAUX_MEILLEUR for c in cartes):
+            continue
+        if stats and not deck_coherent(cartes, stats):
             continue
         perdues = [c for c in evo_ids if c not in cartes]
-        sc = _wilson(g, w) - EVO_PERTE * len(perdues)
+        sc = _wilson(g, w) - penalite_niveaux(cartes, profil) - EVO_PERTE * len(perdues)
         if meilleur is None or sc > meilleur["score"]:
             meilleur = {"cartes": cartes, "g": g, "w": w, "score": sc, "perdues": perdues}
     if not meilleur:
@@ -483,11 +542,11 @@ def deck_bien_monte(mode, profil, stats, p0, evo_ids=frozenset()):
         if any(c not in stats for c in cartes):
             continue
         nouveau, echanges = list(cartes), []
-        for pos, c in enumerate(cartes):
-            if c in pool:
-                continue
-            candidats = [e for e in pool if e not in nouveau and role(stats[e]["name"]) == role(stats[c]["name"])
-                         and abs((stats[e]["elixir"] or 0) - (stats[c]["elixir"] or 0)) <= 1]
+        a_remplacer = sorted((pos for pos, c in enumerate(cartes) if c not in pool),
+                             key=lambda pos: -(manque(profil[cartes[pos]]) if cartes[pos] in profil else 9))   # la plus en retard d'abord
+        for pos in a_remplacer:
+            c = cartes[pos]
+            candidats = [e for e in pool if e not in nouveau and remplacement_possible(e, c, stats)]
             if not candidats:
                 nouveau = None
                 break
@@ -525,10 +584,15 @@ def deck_proche(ids, mode, profil, evo_ids=frozenset()):
         manquantes = [c for c in cartes if profil and (c not in profil or manque(profil[c]) > MAX_NIVEAUX_MANQUANTS)]
         perdues = [c for c in evo_ids if c not in cartes]
         candidats.append({"cartes": cartes, "g": g, "w": w, "communes": communes, "manquantes": manquantes,
-                          "perdues": perdues, "score": _wilson(g, w) - EVO_PERTE * len(perdues)})
+                          "perdues": perdues,
+                          "score": _wilson(g, w) - penalite_niveaux(cartes, profil) - EVO_PERTE * len(perdues)})
     if not candidats:
         return None, decks.get(cle_moi)
-    jouables = [c for c in candidats if not c["manquantes"]] or candidats
+    jouables = [c for c in candidats if not c["manquantes"]]
+    if not jouables:                    # à défaut, un deck dont il manque au plus 2 cartes que tu possèdes (à monter), jamais un deck impossible
+        jouables = [c for c in candidats if len(c["manquantes"]) <= 2 and all(m in (profil or {}) for m in c["manquantes"])]
+    if not jouables:
+        return None, decks.get(cle_moi)
     return max(jouables, key=lambda c: (c["score"], c["communes"])), decks.get(cle_moi)
 
 
@@ -708,10 +772,10 @@ def lignes_synergie(ids, syn, mode, nom):
     res = []
     if paires and paires[-1][0] >= SEUIL_CITATION:
         v, a, b = paires[-1]
-        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (`{100 * min(v, PLAFOND_PAIRE):+.1f}` pt)")
+        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (la paire gagne `{100 * min(v, PLAFOND_PAIRE):+.1f}` pt de plus que prévu)")
     if paires and paires[0][0] <= -SEUIL_CITATION:
         v, a, b = paires[0]
-        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * max(v, -PLAFOND_PAIRE):+.1f}` pt)")
+        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * max(v, -PLAFOND_PAIRE):+.1f}` pt par rapport à ce que valent les cartes seules)")
     return res
 
 
@@ -776,6 +840,29 @@ def stats_cartes(data):
     return par_carte, p0, combats
 
 
+# Sous-rôles : une troupe n'en remplace une autre que si elle joue le même rôle (un tank léger ne remplace pas une nuée,
+# un sort léger ne remplace pas un gros sort). Une carte absente de ces listes retombe sur le rôle général.
+SOUS_ROLES = {}
+for _g, _noms in {
+    "distance": ["Musketeer", "Archers", "Wizard", "Witch", "Princess", "Dart Goblin", "Hunter", "Firecracker", "Magic Archer",
+                 "Electro Wizard", "Ice Wizard", "Executioner", "Bowler", "Night Witch", "Mother Witch", "Fisherman", "Cannon Cart",
+                 "Archer Queen", "Zappies", "Rascals"],
+    "volant": ["Minions", "Minion Horde", "Baby Dragon", "Mega Minion", "Inferno Dragon", "Electro Dragon", "Flying Machine",
+               "Phoenix", "Skeleton Dragons", "Bats"],
+    "melee": ["Knight", "Valkyrie", "Mini P.E.K.K.A", "Dark Prince", "Prince", "Ice Golem", "Lumberjack", "Bandit", "Royal Ghost",
+              "Golden Knight", "Skeleton King", "Monk", "Mighty Miner", "Berserker", "Boss Bandit", "Elite Barbarians",
+              "Giant Skeleton", "Battle Healer", "Guards"],
+    "nuee": ["Skeleton Army", "Goblin Gang", "Goblins", "Spear Goblins", "Barbarians", "Royal Recruits", "Skeletons"],
+    "petit": ["Ice Spirit", "Fire Spirit", "Electro Spirit", "Heal Spirit", "Bomber", "Wall Breakers"],
+    "sort_leger": ["Zap", "Arrows", "The Log", "Giant Snowball", "Barbarian Barrel", "Goblin Curse", "Royal Delivery"],
+    "sort_degats": ["Fireball", "Poison", "Lightning", "Rocket", "Earthquake", "Void"],
+    "sort_utile": ["Rage", "Clone", "Mirror", "Tornado", "Freeze", "Vines"],
+}.items():
+    for _n in _noms:
+        SOUS_ROLES[_n] = _g
+FAMILLES_ROLES = [{"distance", "volant"}, {"melee"}, {"nuee", "petit"}]
+
+
 def role(nom):
     if nom in CARTES_VICTOIRE:
         return "victoire"
@@ -784,6 +871,38 @@ def role(nom):
     if nom in BATIMENTS:
         return "batiment"
     return "troupe"
+
+
+def roles_compatibles(nom_a, nom_b):
+    """Peut-on remplacer une carte par l'autre ? Même rôle général, et même famille quand on la connaît."""
+    if role(nom_a) != role(nom_b):
+        return False
+    sa, sb = SOUS_ROLES.get(nom_a), SOUS_ROLES.get(nom_b)
+    if sa is None or sb is None or sa == sb:
+        return True
+    return any(sa in f and sb in f for f in FAMILLES_ROLES)
+
+
+def remplacement_possible(entrant, sortant, stats):
+    """Rôle compatible et coût proche (écart d'élixir ≤ 1, ≤ 2 entre deux sorts de dégâts)."""
+    if entrant not in stats or sortant not in stats:
+        return False
+    a, b = stats[entrant], stats[sortant]
+    if not roles_compatibles(a["name"], b["name"]):
+        return False
+    tolerance = 2 if role(a["name"]) == "sort" else 1
+    return abs((a["elixir"] or 0) - (b["elixir"] or 0)) <= tolerance
+
+
+def penalite_niveaux(ids, profil):
+    """Perte moyenne estimée (par carte) due aux niveaux manquants ; une carte absente du profil compte comme très en retard."""
+    if not profil:
+        return 0.0
+    total = 0.0
+    for i in ids:
+        m = manque(profil[i]) if i in profil else 6
+        total += PENALITE_NIVEAU * m + PENALITE_NIVEAU_EXTRA * max(0, m - 4)
+    return total / len(ids)
 
 
 def niveau_jeu(carte):
@@ -814,49 +933,83 @@ def elixir_moyen(ids, stats, profil):
 
 
 def ameliorer(ids, evo, stats, p0, profil, exclues=()):
-    """Remplacements proposés : renvoie (nouveau_deck, [(sortant, entrant)])."""
+    """Remplacements proposés : renvoie (nouveau_deck, [(sortant, entrant)]).
+    On compare deux façons de faire : changer une carte puis une autre (glouton), ou les deux changements ensemble
+    (une paire de cartes peut valoir plus que la somme de ses morceaux) ; on garde la meilleure."""
     cartes = list(ids)
     if profil:
         pool = {i for i, c in profil.items() if i not in cartes and manque(c) <= MAX_NIVEAUX_MANQUANTS}
     else:
         pool = set(stats)
     pool = {i for i in pool if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE and i not in exclues}
+
+    def seuil(sortant):
+        sous_niveau = bool(profil) and sortant in profil and manque(profil[sortant]) >= NIVEAUX_MANQUANTS_ALERTE
+        return GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK
+
+    # --- glouton
+    glouton, evo_g, pool_g, nets = list(cartes), list(evo), set(pool), 0.0
     changements = []
     while len(changements) < NB_CHANGEMENTS:
-        base = note_deck(cartes, stats, p0, profil)
+        base = note_deck(glouton, stats, p0, profil)
         meilleur = None
+        for pos, sortant in enumerate(glouton):
+            if sortant not in stats:
+                continue
+            for entrant in pool_g:
+                if not remplacement_possible(entrant, sortant, stats):
+                    continue
+                nouveau = glouton[:pos] + [entrant] + glouton[pos + 1:]
+                if not coherent_apres_changement(glouton, nouveau, stats):
+                    continue
+                net = note_deck(nouveau, stats, p0, profil) - base - (EVO_PERTE if evo_g[pos] else 0.0)
+                if net >= seuil(sortant) and (meilleur is None or net > meilleur[0]):
+                    meilleur = (net, pos, sortant, entrant)
+        if not meilleur:
+            break
+        net, pos, sortant, entrant = meilleur
+        glouton[pos] = entrant
+        evo_g[pos] = False
+        pool_g.discard(entrant)
+        nets += net
+        changements.append((sortant, entrant))
+
+    # --- deux changements simultanés
+    if NB_CHANGEMENTS >= 2:
+        base = note_deck(cartes, stats, p0, profil)
+        simples = []
         for pos, sortant in enumerate(cartes):
             if sortant not in stats:
                 continue
             for entrant in pool:
-                if role(stats[entrant]["name"]) != role(stats[sortant]["name"]):
+                if remplacement_possible(entrant, sortant, stats):
+                    simples.append((pos, sortant, entrant))
+        meilleure_paire = None
+        for a in range(len(simples)):
+            pa, sa, ea = simples[a]
+            for b in range(a + 1, len(simples)):
+                pb, sb, eb = simples[b]
+                if pa == pb or ea == eb:
                     continue
-                if abs((stats[entrant]["elixir"] or 0) - (stats[sortant]["elixir"] or 0)) > 1:
-                    continue
-                nouveau = cartes[:pos] + [entrant] + cartes[pos + 1:]
+                nouveau = list(cartes)
+                nouveau[pa], nouveau[pb] = ea, eb
                 if not coherent_apres_changement(cartes, nouveau, stats):
                     continue
-                gain = note_deck(nouveau, stats, p0, profil) - base
-                sous_niveau = bool(profil) and sortant in profil and manque(profil[sortant]) >= NIVEAUX_MANQUANTS_ALERTE
-                net = gain - (EVO_PERTE if evo[pos] else 0.0)
-                if net >= (GAIN_MINIMUM if sous_niveau else GAIN_MINIMUM_NIVEAU_OK) and (meilleur is None or net > meilleur[0]):
-                    meilleur = (net, pos, sortant, entrant)
-        if not meilleur:
-            break
-        _, pos, sortant, entrant = meilleur
-        cartes[pos] = entrant
-        evo = list(evo)
-        evo[pos] = False
-        pool.discard(entrant)
-        changements.append((sortant, entrant))
-    return cartes, changements
+                net = (note_deck(nouveau, stats, p0, profil) - base - (EVO_PERTE if evo[pa] else 0.0) - (EVO_PERTE if evo[pb] else 0.0))
+                if net >= seuil(sa) + seuil(sb) and (meilleure_paire is None or net > meilleure_paire[0]):
+                    meilleure_paire = (net, nouveau, [(sa, ea), (sb, eb)])
+        if meilleure_paire and meilleure_paire[0] > nets + 0.002:
+            return meilleure_paire[1], meilleure_paire[2]
+    return glouton, changements
 
 
-def optimiser_ensemble(decks_ids, evos, stats, p0, profil):
+def optimiser_ensemble(decks_ids, evos, stats, p0, profil, nb_modifiables=None):
     """Améliore plusieurs decks de guerre à la fois, sans aucune carte en commun entre eux.
 
     Une carte déjà présente dans un des 4 decks ne peut pas être proposée dans un autre : les remplaçantes viennent
     uniquement des cartes libres. Les doublons de départ sont corrigés en priorité (ils pèsent plus lourd que tout gain).
+    Comme pour un deck seul : une évolution peut être retirée si le deck est nettement mieux (pénalité EVO_PERTE), et la défense
+    aérienne ne doit pas baisser. Les decks au-delà de `nb_modifiables` (decks retrouvés dans l'historique) ne sont pas touchés.
     Renvoie (decks, changements) ; changement = (numéro_deck, carte_sortante, carte_entrante, None)."""
     decks = [list(d) for d in decks_ids]
     n = len(decks)
@@ -869,11 +1022,9 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil):
         return sum(note_deck(d, stats, p0, profil) for d in ds) - 1.0 * doublons(ds)
 
     def compatibles(x, y):
-        if x not in stats or y not in stats:
-            return False
-        if role(stats[x]["name"]) != role(stats[y]["name"]):
-            return False
-        return abs((stats[x]["elixir"] or 0) - (stats[y]["elixir"] or 0)) <= 1
+        return remplacement_possible(y, x, stats)
+
+    nb_modifiables = n if nb_modifiables is None else nb_modifiables
 
     utilisees = {c for d in decks for c in d}
     if profil:
@@ -887,25 +1038,27 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil):
     for _ in range(4 * n):
         courant = objectif(decks)
         meilleur = None
-        for k in range(n):
+        for k in range(min(n, nb_modifiables)):
             for pos in range(8):
                 x = decks[k][pos]
-                if evos[k][pos]:
-                    continue
                 if nb[k] < limite:
                     for y in pool:
                         if not compatibles(x, y):
                             continue
+                        avant_k = list(decks[k])
                         decks[k][pos] = y
-                        gain = objectif(decks) - courant
+                        gain = objectif(decks) - courant - (EVO_PERTE if evos[k][pos] else 0.0)
+                        ok = coherent_apres_changement(avant_k, decks[k], stats)
                         decks[k][pos] = x
-                        if gain >= GAIN_MINIMUM and (meilleur is None or gain > meilleur[0]):
+                        if ok and gain >= GAIN_MINIMUM and (meilleur is None or gain > meilleur[0]):
                             meilleur = (gain, "remplace", k, pos, y, None, None)
         if not meilleur:
             break
         _, genre, k, pos, y, _j, _pos2 = meilleur
         x = decks[k][pos]
         decks[k][pos] = y
+        evos[k] = list(evos[k])
+        evos[k][pos] = False
         pool.discard(y)
         nb[k] += 1
         changements.append((k, x, y, None))
@@ -1015,7 +1168,7 @@ def points_attention(ids, stats, profil):
         notes.append(f"élixir moyen très bas ({el:.1f})")
     elif el > 4.4:
         notes.append(f"élixir moyen très élevé ({el:.1f})")
-    rares = [nom_fr(stats[i]["name"]) for i in ids if i not in stats or stats[i]["games"] < MIN_PARTIES_CARTE]
+    rares = [nom_fr(stats[i]["name"]) if i in stats else f"carte {i}" for i in ids if i not in stats or stats[i]["games"] < MIN_PARTIES_CARTE]
     if rares:
         notes.append("peu de données sur " + ", ".join(rares))
     return notes
@@ -1040,7 +1193,7 @@ def etiquette(score, p0):
 CONSIGNES = """🔎 **ANALYSE DE DECK**
 
 1️⃣ Copie ton deck dans le jeu (bouton « Copier le deck »)
-2️⃣ Colle-le ici, avec le mode écrit avant le lien :
+2️⃣ Colle-le ici, avec le mode écrit dans ton message (avant ou après le lien) :
 • `gdc` = guerre de clan
 • `voie` = voie des trophées
 • rien = classé (par défaut)
@@ -1057,7 +1210,7 @@ Exemple : `gdc` puis ton message copié
 
 🆔 **Sans lien** : écris juste ton tag, avec le mode : `gdc #TAG`, `voie #TAG`, `classe #TAG` ou `#TAG` (classé). Le bot lit ton deck dans tes derniers combats.
 
-💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Un deck par message (jusqu'à 4 en guerre)."""
+💡 Le lien contient ton tag : le bot connaît le niveau de tes cartes. C'est une estimation, pas une garantie. En guerre, données du jeudi au lundi seulement. Hors guerre, seul le premier deck du message est analysé ; en guerre, jusqu'à 4."""
 
 AIDE = ("Utilise : `!deck <mode> <lien du deck>`\n"
         "Modes : `gdc` (guerre), `classe` (Parcours des légendes), `voie` (voie des trophées).\n"
@@ -1123,16 +1276,119 @@ def est_champion(cid, stats, profil):
     return nom in CHAMPIONS or rarete == "champion"
 
 
+def formes_agregees(mode):
+    agg = {}
+    for jour in charger_decks()["formes"].values():
+        for cid, fm in (jour.get(mode) or {}).items():
+            a = agg.setdefault(int(cid), {})
+            for f, (g, w) in fm.items():
+                e = a.setdefault(f, [0, 0])
+                e[0] += g
+                e[1] += w
+    return agg
+
+
+def delta_forme(agg, cid, f):
+    """Écart de winrate (lissé) entre la carte jouée dans la forme f et normale ; None sans assez de données."""
+    a = agg.get(cid) or {}
+    n, x = a.get("n"), a.get(f)
+    if not n or not x or n[0] < FORME_MIN_PARTIES or x[0] < FORME_MIN_PARTIES:
+        return None
+    return (x[1] / x[0] - n[1] / n[0]) * x[0] / (x[0] + K_FORME)
+
+
+def evolution_possedee(cid, profil, slots_user):
+    if profil and cid in profil and (profil[cid].get("evolutionLevel") or 0) > 0:
+        return True
+    return slots_user.get(cid) == 1
+
+
+def hero_possede(cid, profil, slots_user):
+    if slots_user.get(cid) == 2:
+        return True
+    c = (profil or {}).get(cid) or {}
+    return any("hero" in k.lower() and not isinstance(v, (dict, list)) and v for k, v in c.items())
+
+
+def formes_non_possedees(ids, slots, profil):
+    """Cartes que tu joues en évolution alors que ton profil n'indique pas que tu l'as (seulement si le profil donne l'info)."""
+    if not profil or not any("evolutionLevel" in c for c in profil.values()):
+        return []
+    return [i for p, i in enumerate(ids) if slots[p] == 1 and i in profil and not (profil[i].get("evolutionLevel") or 0) > 0]
+
+
+def meilleure_version(cartes, slots_user, profil, stats, mode):
+    """Pour un jeu de 8 cartes : quelles cartes jouer en évolution (2 emplacements) et en héros (2 emplacements),
+    parmi celles que tu possèdes dans cette forme, d'après le winrate de chaque forme chez les meilleurs joueurs.
+    Renvoie {slots: {id: 1|2}, evo, hero, donnees}. Les champions sont toujours en héros."""
+    import itertools
+    agg = formes_agregees(mode)
+    forces = [c for c in cartes if est_champion(c, stats, profil)][:2]
+    evo_ok = [c for c in cartes if c not in forces and evolution_possedee(c, profil, slots_user)]
+    hero_ok = [c for c in cartes if c not in forces and hero_possede(c, profil, slots_user)]
+
+    def valeur(c, f):
+        dlt = delta_forme(agg, c, f)
+        if dlt is not None:
+            return dlt, True
+        return (0.002 if slots_user.get(c) == (1 if f == "e" else 2) else 0.0), False       # sans données : on garde ce que tu joues déjà
+
+    meilleur = None
+    for ne in range(0, min(2, len(evo_ok)) + 1):
+        for evo in itertools.combinations(evo_ok, ne):
+            libres = [c for c in hero_ok if c not in evo]
+            for nh in range(0, min(2 - len(forces), len(libres)) + 1):
+                for hero in itertools.combinations(libres, nh):
+                    total, donnees = 0.0, False
+                    for c in evo:
+                        v, d_ = valeur(c, "e")
+                        total += v
+                        donnees = donnees or d_
+                    for c in hero:
+                        v, d_ = valeur(c, "h")
+                        total += v
+                        donnees = donnees or d_
+                    if meilleur is None or total > meilleur[0] + 1e-9:
+                        meilleur = (total, list(evo), forces + list(hero), donnees)
+    total, evo, hero, donnees = meilleur
+    sl = {c: 1 for c in evo}
+    sl.update({c: 2 for c in hero})
+    return {"slots": sl, "evo": evo, "hero": hero, "gain": total, "donnees": donnees}
+
+
+def version_et_lien(cartes, mode, profil, stats, evo_de, tt):
+    """Le lien « Copier ce deck » avec la meilleure version (évolutions / héros) et une ligne qui l'explique."""
+    mv = meilleure_version(cartes, evo_de, profil, stats, mode) if mode in ("classe", "voie") else None
+    slots = [(mv["slots"].get(c, 0) if mv else evo_de.get(c, 0)) for c in cartes]
+    lien = lien_deck_ordonne(cartes, slots, tt, stats, profil)
+    ligne = None
+    if mv and (mv["evo"] or mv["hero"]):
+        morceaux = []
+        if mv["evo"]:
+            morceaux.append("évolutions " + " + ".join(nom_fr(stats[c]["name"]) if c in stats else str(c) for c in mv["evo"]))
+        if mv["hero"]:
+            morceaux.append("héros " + " + ".join(nom_fr(stats[c]["name"]) if c in stats else str(c) for c in mv["hero"]))
+        ligne = "✨ Meilleure version : " + " · ".join(morceaux)
+    return lien, ligne
+
+
 def lien_deck_ordonne(cartes, slots, tt, stats, profil):
     """Lien « Copier le deck » valide : les cartes à évolution gardent les deux premiers emplacements (avec leur drapeau),
     et le champion (Petit prince...) est placé en 3ᵉ position, sinon le jeu refuse de coller le deck."""
     slot_de = {c: (slots[p] if p < len(slots) else 0) for p, c in enumerate(cartes)}
-    champ = [c for c in cartes if est_champion(c, stats, profil)][:1]
-    speciaux = [c for c in cartes if slot_de.get(c) and c not in champ][:2]
-    autres = [c for c in cartes if c not in speciaux and c not in champ]
-    ordre = speciaux + autres
-    for c in champ:
-        ordre.insert(min(2, len(ordre)), c)
+    for c in cartes:
+        if est_champion(c, stats, profil):
+            slot_de[c] = 2                                   # un champion se joue toujours en héros
+    evos = [c for c in cartes if slot_de.get(c) == 1][:2]
+    heros = [c for c in cartes if slot_de.get(c) == 2][:2]
+    autres = [c for c in cartes if c not in evos and c not in heros]
+    ordre = list(evos)
+    while len(ordre) < 2 and autres:                         # emplacements 1-2 : évolutions, sinon cartes normales
+        ordre.append(autres.pop(0))
+    ordre += heros
+    while len(ordre) < 4 and autres:                         # emplacements 3-4 : héros, sinon cartes normales
+        ordre.append(autres.pop(0))
+    ordre += autres
     return lien_deck(ordre, [slot_de.get(c, 0) for c in ordre], tt)
 
 
@@ -1167,6 +1423,41 @@ def donnees_du_mode(mode):
     return _CACHE_DIRECT[mode]
 
 
+def age_donnees(data):
+    """Nombre de jours depuis le dernier combat enregistré (None si on ne sait pas)."""
+    jours = [j for j in (data or {}).get("days", {})]
+    if not jours:
+        return None
+    try:
+        dernier = datetime.date.fromisoformat(max(jours))
+    except ValueError:
+        return None
+    return (aujourdhui_utc() - dernier).days
+
+
+def assembler(sections, limite=4000):
+    """Assemble les sections en gardant les blocs entiers : une section qui ne rentre plus est laissée de côté
+    (jamais coupée en plein milieu, ce qui casserait un lien « Copier le deck »)."""
+    garde, taille = [], 0
+    for k, sec in enumerate(sections):
+        ajout = len(sec) + (2 if garde else 0)
+        if taille + ajout > limite and k >= 2:
+            continue
+        garde.append(sec)
+        taille += ajout
+    return "\n\n".join(garde)[:limite]
+
+
+def niveau_confiance(ids, stats, combats):
+    """Confiance dans l'estimation : faible / moyenne / élevée, selon le nombre de parties derrière chaque carte."""
+    parties = [stats[i]["games"] if i in stats else 0 for i in ids]
+    if min(parties) >= 5 * MIN_PARTIES_CARTE and combats >= 3 * MIN_COMBATS_MODE:
+        return "élevée"
+    if min(parties) >= MIN_PARTIES_CARTE:
+        return "moyenne"
+    return "faible"
+
+
 def construire_reponse(mode, decks, tag, devine):
     """Renvoie (texte_simple, embed)."""
     note_auto = None
@@ -1191,8 +1482,6 @@ def construire_reponse(mode, decks, tag, devine):
         p = api_get(f"/players/{enc(tag)}")
         if p and p.get("cards"):
             profil = {c["id"]: c for c in p["cards"]}
-            if not all(i in profil for d in decks for i in d[0]):
-                profil = None
     autres = []
     if mode == "gdc" and tag:
         autres = autres_decks_guerre(tag, [d[0] for d in decks], 4 - len(decks))
@@ -1201,6 +1490,7 @@ def construire_reponse(mode, decks, tag, devine):
     exclues = {c for a in autres for c in a}
     evo = [s > 0 for s in slots]
 
+    absentes = [i for i in ids if profil and i not in profil]
     score = note_deck(ids, stats, p0, profil)
     el_avant = elixir_moyen(ids, stats, profil)
     evo_de = {i: slots[p] for p, i in enumerate(ids)}
@@ -1222,12 +1512,18 @@ def construire_reponse(mode, decks, tag, devine):
         else:
             lignes.append(f"{nom_carte(i)}{' ✨' if evo[pos] else ''} — peu de données")
     sections = [f"**{etiquette(score, p0)}** · winrate estimé `≈{100 * score:.1f}%` "
-                f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode}"
+                f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode} · confiance {niveau_confiance(ids, stats, combats)}"
                 + (f"\n-# {note_auto}" if note_auto else "")
+                + (f"\n-# ⚠️ Données anciennes : dernier combat enregistré il y a {age} jours." if (age := age_donnees(data)) is not None and age >= 2 and source == "stockees" else "")
                 + (" · données lues en direct" if source == "direct" else "")
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
+    if absentes:
+        notes.append("ne figure(nt) pas dans ton profil : " + ", ".join(nom_fr(stats[i]["name"]) if i in stats else f"carte {i}" for i in absentes))
+    non_poss = formes_non_possedees(ids, slots, profil)
+    if non_poss:
+        notes.append("tu joues en évolution " + ", ".join(nom_fr(stats[i]["name"]) if i in stats else str(i) for i in non_poss) + " mais ton profil indique que tu ne l'as pas")
     notes_syn = lignes_synergie(ids, _SYN["data"], mode, lambda i: nom_carte(i, False))
     if notes_syn:
         sections.append("**🔗 Synergies**\n" + "\n".join(notes_syn))
@@ -1238,14 +1534,23 @@ def construire_reponse(mode, decks, tag, devine):
         for sortant, entrant in changements:
             lig.append(f"🔁 {nom_carte(sortant)}{' (évolution retirée)' if sortant in evo_ids else ''} → **{nom_carte(entrant)}**")
         el_apres = elixir_moyen(nouveau, stats, profil)
-        nouveaux_slots = [0 if nouveau[p] != ids[p] else slots[p] for p in range(8)]
+        lien_am, ligne_am = version_et_lien(nouveau, mode, profil, stats, {c: v for c, v in evo_de.items() if c in nouveau}, tt)
         sections.append("**🔧 Améliorations proposées**\n" + "\n".join(lig)
                         + f"\n📊 estimé `≈{100 * score:.1f}%` → `≈{100 * score_apres:.1f}%`"
                         + f"\n⚡ élixir `{el_avant:.1f}` → `{el_apres:.1f}`"
-                        + f"\n[📥 Copier le deck amélioré]({lien_deck_ordonne(nouveau, nouveaux_slots, tt, stats, profil)})"
+                        + (f"\n{ligne_am}" if ligne_am else "")
+                        + f"\n[📥 Copier le deck amélioré]({lien_am})"
                         + ("" if profil else "\n-# Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
     else:
         sections.append(f"**🔧 Améliorations** : rien de mieux à proposer{' avec tes cartes' if profil else ''} (⚡ élixir `{el_avant:.1f}`).")
+        if mode in ("classe", "voie"):
+            mv = meilleure_version(ids, evo_de, profil, stats, mode)
+            actuel_evo = {c for c, v in evo_de.items() if v == 1}
+            actuel_hero = {c for c, v in evo_de.items() if v == 2}
+            if mv["donnees"] and (set(mv["evo"]) != actuel_evo or set(mv["hero"]) != actuel_hero):
+                lien_v, ligne_v = version_et_lien(ids, mode, profil, stats, evo_de, tt)
+                sections.append(f"**✨ Meilleure version de ton deck**\nMême cartes, autres emplacements : {ligne_v.replace('✨ Meilleure version : ', '')}"
+                                f"\n[📥 Copier ce deck]({lien_v})")
     if mode in ("classe", "voie"):
         proche, mon = deck_proche(ids, mode, profil, evo_ids)
         if proche:
@@ -1261,28 +1566,33 @@ def construire_reponse(mode, decks, tag, devine):
                 txt += "\n⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in proche["perdues"])
             if proche["manquantes"]:
                 txt += "\n⚠️ Il te manque ou tu as trop bas : " + ", ".join(nom_carte(i, False) for i in proche["manquantes"])
-            txt += f"\n[📥 Copier ce deck]({lien_deck_ordonne(proche['cartes'], slots_p, tt, stats, profil)})"
+            lien_p, ligne_p = version_et_lien(proche["cartes"], mode, profil, stats, evo_de, tt)
+            txt += (f"\n{ligne_p}" if ligne_p else "") + f"\n[📥 Copier ce deck]({lien_p})"
             sections.append("**🏅 Deck proche chez les meilleurs joueurs**\n" + txt)
-        top = meilleur_deck_jouable(mode, profil, proche, evo_ids)
+        top = meilleur_deck_jouable(mode, profil, proche, evo_ids, stats)
         if top:
-            lien_top = lien_deck_ordonne(top["cartes"], [evo_de.get(i, 0) for i in top["cartes"]], tt, stats, profil)
+            lien_top, ligne_top = version_et_lien(top["cartes"], mode, profil, stats, evo_de, tt)
             sections.append(f"**🏆 Le mieux classé que tu peux jouer** : `{100 * top['w'] / top['g']:.1f}%` de victoires sur {top['g']} parties\n"
                             + ", ".join(nom_carte(i, False) for i in top["cartes"])
                             + ("\n⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in top["perdues"]) if top["perdues"] else "")
-                            + f"\n[📥 Copier ce deck]({lien_top})")
+                            + (f"\n{ligne_top}" if ligne_top else "") + f"\n[📥 Copier ce deck]({lien_top})")
     if mode in ("classe", "voie") and profil:
         bm = deck_bien_monte(mode, profil, stats, p0, evo_ids)
         if bm and set(bm["cartes"]) != set(ids) and bm["note"] >= score - 0.003:
-            lig = [f"Inspiré d'un deck à `{100 * bm['w'] / bm['g']:.1f}%` de victoires chez les meilleurs ({bm['g']} parties), "
-                   "avec uniquement des cartes que tu as au niveau 15-16"]
+            lig = [f"Inspiré d'un deck à `{100 * bm['w'] / bm['g']:.1f}%` de victoires chez les meilleurs ({bm['g']} parties) ; "
+                   "la version ci-dessous est modifiée (cartes que tu as au niveau 15-16), donc son estimation est la mienne, pas ce chiffre"]
             lui, moi = set(bm["cartes"]), set(ids)
             sortent = [nom_carte(i, False) for i in ids if i not in lui]
             entrent = [nom_carte(i, False) for i in bm["cartes"] if i not in moi]
             lig.append(f"🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
             if bm["perdues"]:
                 lig.append("⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in bm["perdues"]))
-            lig.append(f"📊 estimé `≈{100 * (bm['note'] + EVO_PERTE * len(bm['perdues'])):.1f}%` (ton deck : `≈{100 * score:.1f}%`)")
-            lig.append(f"[📥 Copier ce deck]({lien_deck_ordonne(bm['cartes'], [evo_de.get(i, 0) for i in bm['cartes']], tt, stats, profil)})")
+            lig.append(f"📊 estimé `≈{100 * (bm['note'] + EVO_PERTE * len(bm['perdues'])):.1f}%` (ton deck : `≈{100 * score:.1f}%`)"
+                       + (f" · l'évolution retirée compte pour −{100 * EVO_PERTE * len(bm['perdues']):.0f} pt dans la comparaison" if bm["perdues"] else ""))
+            lien_b, ligne_b = version_et_lien(bm["cartes"], mode, profil, stats, evo_de, tt)
+            if ligne_b:
+                lig.append(ligne_b)
+            lig.append(f"[📥 Copier ce deck]({lien_b})")
             sections.append("**💪 Version bien montée**\n" + "\n".join(lig))
     if mode in ("classe", "voie"):
         arch = archetype([(stats[i]["name"], stats[i].get("elixir")) for i in ids if i in stats])
@@ -1311,7 +1621,7 @@ def construire_reponse(mode, decks, tag, devine):
         sections.append("-# Plusieurs decks collés : seul le premier est analysé dans ce mode.")
     sections.append("-# Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : "
                     "un conseil, pas une garantie. Je juge les cartes une par une, pas ta façon de jouer : si ton deck marche déjà bien, garde-le et monte tes cartes.")
-    embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": "\n\n".join(sections)[:4000], "color": 3447003,
+    embed = {"title": f"🔎 Analyse de deck — {nom_mode}", "description": assembler(sections), "color": 3447003,
              "footer": {"text": "Autre deck ? Colle le lien (écris gdc, voie ou classe avant) · !aide pour les consignes"}}
     return None, embed
 
@@ -1321,10 +1631,10 @@ def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source, note
     `autres` : decks retrouvés dans l'historique du joueur, qui ne sont pas modifiés (seules leurs cartes sont protégées)."""
     nb = len(decks)
     ids_liste = [d[0] for d in decks] + list(autres)
-    evos = [[s > 0 for s in d[1]] for d in decks] + [[True] * 8 for _ in autres]
+    evos = [[s > 0 for s in d[1]] for d in decks] + [[False] * 8 for _ in autres]
     tous = [c for ids in ids_liste for c in ids]
     doublons = sorted({c for c in tous if tous.count(c) > 1})
-    tous_nouveaux, changements = optimiser_ensemble(ids_liste, evos, stats, p0, profil)
+    tous_nouveaux, changements = optimiser_ensemble(ids_liste, evos, stats, p0, profil, nb_modifiables=nb)
     nouveaux = tous_nouveaux[:nb]
     ids_liste_modif = ids_liste[:nb]
     avant = sum(note_deck(i, stats, p0, profil) for i in ids_liste_modif) / nb
@@ -1366,7 +1676,7 @@ def construire_embed_gdc(decks, autres, stats, p0, combats, profil, source, note
     sections.append(f"-# Les {len(tous_nouveaux)} decks n'ont aucune carte en commun ({len(set(toutes))} cartes différentes). "
                     "Estimation basée sur le winrate des cartes chez les meilleurs joueurs, niveau des cartes pris en compte : un conseil, pas une garantie."
                     + ("" if profil else " Sans ton tag, je ne peux pas vérifier que tu possèdes ces cartes ni leur niveau."))
-    return {"title": "🔎 Analyse de tes decks de guerre", "description": "\n\n".join(sections)[:4000], "color": 3447003,
+    return {"title": "🔎 Analyse de tes decks de guerre", "description": assembler(sections), "color": 3447003,
             "footer": {"text": "Autre analyse ? Colle tes 4 liens (écris gdc avant) · !aide pour les consignes"}}
 
 
