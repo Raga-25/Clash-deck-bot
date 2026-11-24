@@ -546,11 +546,12 @@ def deck_bien_monte(mode, profil, stats, p0, evo_ids=frozenset()):
                              key=lambda pos: -(manque(profil[cartes[pos]]) if cartes[pos] in profil else 9))   # la plus en retard d'abord
         for pos in a_remplacer:
             c = cartes[pos]
-            candidats = [e for e in pool if e not in nouveau and remplacement_possible(e, c, stats)]
+            candidats = [e for e in pool if e not in nouveau and penalite_remplacement(e, c, stats) is not None]
             if not candidats:
                 nouveau = None
                 break
-            e = max(candidats, key=lambda x: note_deck(nouveau[:pos] + [x] + nouveau[pos + 1:], stats, p0, profil))
+            e = max(candidats, key=lambda x: note_deck(nouveau[:pos] + [x] + nouveau[pos + 1:], stats, p0, profil)
+                    - penalite_remplacement(x, c, stats))
             echanges.append((c, e))
             nouveau[pos] = e
         if nouveau is None or not coherent_apres_changement(cartes, nouveau, stats):
@@ -772,10 +773,10 @@ def lignes_synergie(ids, syn, mode, nom):
     res = []
     if paires and paires[-1][0] >= SEUIL_CITATION:
         v, a, b = paires[-1]
-        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (la paire gagne `{100 * min(v, PLAFOND_PAIRE):+.1f}` pt de plus que prévu)")
+        res.append(f"✨ Bonne synergie : {nom(a)} + {nom(b)} (écart observé chez les meilleurs pour cette paire : `{100 * min(v, PLAFOND_PAIRE):+.1f}` pt ; son effet direct sur la note du deck est bien plus petit)")
     if paires and paires[0][0] <= -SEUIL_CITATION:
         v, a, b = paires[0]
-        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (`{100 * max(v, -PLAFOND_PAIRE):+.1f}` pt par rapport à ce que valent les cartes seules)")
+        res.append(f"⚠️ Paire qui sous-performe : {nom(a)} + {nom(b)} (écart observé chez les meilleurs pour cette paire : `{100 * max(v, -PLAFOND_PAIRE):+.1f}` pt ; son effet direct sur la note du deck est bien plus petit)")
     return res
 
 
@@ -883,15 +884,35 @@ def roles_compatibles(nom_a, nom_b):
     return any(sa in f and sb in f for f in FAMILLES_ROLES)
 
 
-def remplacement_possible(entrant, sortant, stats):
-    """Rôle compatible et coût proche (écart d'élixir ≤ 1, ≤ 2 entre deux sorts de dégâts)."""
+PENALITE_FAMILLE = 0.004        # remplacer une carte par une autre famille du même rôle (ex. mêlée -> nuée) coûte ce malus
+PENALITE_ELIXIR_1 = 0.002       # un point d'élixir de plus que l'écart toléré
+PENALITE_ELIXIR_2 = 0.006       # deux points de plus ; au-delà, interdit
+
+
+def penalite_remplacement(entrant, sortant, stats):
+    """Coût (en winrate) d'un remplacement, ou None s'il est interdit.
+    Interdits : changer de rôle général (carte de victoire, sort, bâtiment, troupe) ou plus de 2 points d'élixir au-delà de l'écart toléré
+    (1 point d'écart, 2 entre sorts). Le reste est permis avec un malus : une autre famille du même rôle, un écart d'élixir un peu plus grand."""
     if entrant not in stats or sortant not in stats:
-        return False
+        return None
     a, b = stats[entrant], stats[sortant]
-    if not roles_compatibles(a["name"], b["name"]):
-        return False
+    if role(a["name"]) != role(b["name"]):
+        return None
+    pen = 0.0 if roles_compatibles(a["name"], b["name"]) else PENALITE_FAMILLE
     tolerance = 2 if role(a["name"]) == "sort" else 1
-    return abs((a["elixir"] or 0) - (b["elixir"] or 0)) <= tolerance
+    exces = abs((a["elixir"] or 0) - (b["elixir"] or 0)) - tolerance
+    if exces >= 3:
+        return None
+    if exces == 2:
+        pen += PENALITE_ELIXIR_2
+    elif exces == 1:
+        pen += PENALITE_ELIXIR_1
+    return pen
+
+
+def remplacement_possible(entrant, sortant, stats):
+    """Remplacement sans aucun malus (même famille, écart d'élixir toléré)."""
+    return penalite_remplacement(entrant, sortant, stats) == 0.0
 
 
 def penalite_niveaux(ids, profil):
@@ -900,7 +921,7 @@ def penalite_niveaux(ids, profil):
         return 0.0
     total = 0.0
     for i in ids:
-        m = manque(profil[i]) if i in profil else 6
+        m = niveaux_manquants(i, profil)
         total += PENALITE_NIVEAU * m + PENALITE_NIVEAU_EXTRA * max(0, m - 4)
     return total / len(ids)
 
@@ -913,11 +934,21 @@ def manque(carte):
     return max(0, carte.get("maxLevel", carte.get("level", 0)) - carte.get("level", 0))
 
 
+NIVEAUX_CARTE_ABSENTE = 6    # une carte absente du profil est une carte que tu n'as pas : comptée comme 6 niveaux de retard
+
+
+def niveaux_manquants(i, profil):
+    """Niveaux qui manquent à la carte i ; 0 si on ne connaît pas le profil, NIVEAUX_CARTE_ABSENTE si tu ne la possèdes pas."""
+    if not profil:
+        return 0
+    return manque(profil[i]) if i in profil else NIVEAUX_CARTE_ABSENTE
+
+
 def note_deck(ids, stats, p0, profil):
     total = 0.0
     for i in ids:
         wr = stats[i]["wr"] if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE else p0
-        m = manque(profil[i]) if profil and i in profil else 0
+        m = niveaux_manquants(i, profil)
         pen = PENALITE_NIVEAU * m + PENALITE_NIVEAU_EXTRA * max(0, m - 4)
         total += wr - pen
     return total / len(ids) + bonus_synergie(ids, _SYN["data"], _SYN["mode"])
@@ -957,12 +988,13 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
             if sortant not in stats:
                 continue
             for entrant in pool_g:
-                if not remplacement_possible(entrant, sortant, stats):
+                pen = penalite_remplacement(entrant, sortant, stats)
+                if pen is None:
                     continue
                 nouveau = glouton[:pos] + [entrant] + glouton[pos + 1:]
                 if not coherent_apres_changement(glouton, nouveau, stats):
                     continue
-                net = note_deck(nouveau, stats, p0, profil) - base - (EVO_PERTE if evo_g[pos] else 0.0)
+                net = note_deck(nouveau, stats, p0, profil) - base - pen - (EVO_PERTE if evo_g[pos] else 0.0)
                 if net >= seuil(sortant) and (meilleur is None or net > meilleur[0]):
                     meilleur = (net, pos, sortant, entrant)
         if not meilleur:
@@ -982,20 +1014,21 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
             if sortant not in stats:
                 continue
             for entrant in pool:
-                if remplacement_possible(entrant, sortant, stats):
-                    simples.append((pos, sortant, entrant))
+                pen = penalite_remplacement(entrant, sortant, stats)
+                if pen is not None:
+                    simples.append((pos, sortant, entrant, pen))
         meilleure_paire = None
         for a in range(len(simples)):
-            pa, sa, ea = simples[a]
+            pa, sa, ea, qa = simples[a]
             for b in range(a + 1, len(simples)):
-                pb, sb, eb = simples[b]
+                pb, sb, eb, qb = simples[b]
                 if pa == pb or ea == eb:
                     continue
                 nouveau = list(cartes)
                 nouveau[pa], nouveau[pb] = ea, eb
                 if not coherent_apres_changement(cartes, nouveau, stats):
                     continue
-                net = (note_deck(nouveau, stats, p0, profil) - base - (EVO_PERTE if evo[pa] else 0.0) - (EVO_PERTE if evo[pb] else 0.0))
+                net = (note_deck(nouveau, stats, p0, profil) - base - qa - qb - (EVO_PERTE if evo[pa] else 0.0) - (EVO_PERTE if evo[pb] else 0.0))
                 if net >= seuil(sa) + seuil(sb) and (meilleure_paire is None or net > meilleure_paire[0]):
                     meilleure_paire = (net, nouveau, [(sa, ea), (sb, eb)])
         if meilleure_paire and meilleure_paire[0] > nets + 0.002:
@@ -1008,11 +1041,14 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil, nb_modifiables=None):
 
     Une carte déjà présente dans un des 4 decks ne peut pas être proposée dans un autre : les remplaçantes viennent
     uniquement des cartes libres. Les doublons de départ sont corrigés en priorité (ils pèsent plus lourd que tout gain).
-    Comme pour un deck seul : une évolution peut être retirée si le deck est nettement mieux (pénalité EVO_PERTE), et la défense
-    aérienne ne doit pas baisser. Les decks au-delà de `nb_modifiables` (decks retrouvés dans l'historique) ne sont pas touchés.
+    Comme pour un deck seul : une évolution peut être retirée si le deck est nettement mieux (pénalité EVO_PERTE), la structure
+    du deck et la défense aérienne ne doivent pas se dégrader, et un remplacement « moins naturel » coûte un malus.
+    On compare la recherche carte par carte (glouton) avec des départs où deux cartes d'un même deck changent ensemble
+    (une paire peut valoir plus que la somme de ses morceaux) et on garde le meilleur résultat.
+    Les decks au-delà de `nb_modifiables` (decks retrouvés dans l'historique) ne sont pas touchés.
     Renvoie (decks, changements) ; changement = (numéro_deck, carte_sortante, carte_entrante, None)."""
-    decks = [list(d) for d in decks_ids]
-    n = len(decks)
+    n = len(decks_ids)
+    nb_modifiables = n if nb_modifiables is None else nb_modifiables
 
     def doublons(ds):
         tous = [c for d in ds for c in d]
@@ -1021,47 +1057,96 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil, nb_modifiables=None):
     def objectif(ds):
         return sum(note_deck(d, stats, p0, profil) for d in ds) - 1.0 * doublons(ds)
 
-    def compatibles(x, y):
-        return remplacement_possible(y, x, stats)
-
-    nb_modifiables = n if nb_modifiables is None else nb_modifiables
-
-    utilisees = {c for d in decks for c in d}
+    depart = [list(d) for d in decks_ids]
+    evos0 = [list(e) for e in evos]
+    utilisees = {c for d in depart for c in d}
     if profil:
-        pool = {i for i, c in profil.items() if i not in utilisees and manque(c) <= MAX_NIVEAUX_MANQUANTS}
+        pool0 = {i for i, c in profil.items() if i not in utilisees and manque(c) <= MAX_NIVEAUX_MANQUANTS}
     else:
-        pool = set(stats) - utilisees
-    pool = {i for i in pool if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE}
-    limite = NB_CHANGEMENTS + (2 if doublons(decks) else 0)
-    nb = [0] * n
-    changements = []
-    for _ in range(4 * n):
-        courant = objectif(decks)
-        meilleur = None
-        for k in range(min(n, nb_modifiables)):
-            for pos in range(8):
-                x = decks[k][pos]
-                if nb[k] < limite:
+        pool0 = set(stats) - utilisees
+    pool0 = {i for i in pool0 if i in stats and stats[i]["games"] >= MIN_PARTIES_CARTE}
+    limite = NB_CHANGEMENTS + (2 if doublons(depart) else 0)
+    obj0 = objectif(depart)
+
+    def lancer(paire=None):
+        """Une recherche complète, éventuellement démarrée par un échange de deux cartes dans un même deck.
+        Renvoie (valeur, decks, changements) ; valeur = gain d'objectif moins les malus payés."""
+        decks = [list(d) for d in depart]
+        evos = [list(e) for e in evos0]
+        pool = set(pool0)
+        nb = [0] * n
+        changements, cout = [], 0.0
+        if paire:
+            k, echanges, malus = paire
+            for pos, y in echanges:
+                changements.append((k, decks[k][pos], y, None))
+                decks[k][pos] = y
+                evos[k][pos] = False
+                pool.discard(y)
+            nb[k] += 2
+            cout += malus
+        for _ in range(4 * n):
+            courant = objectif(decks)
+            meilleur = None
+            for k in range(min(n, nb_modifiables)):
+                if nb[k] >= limite:
+                    continue
+                for pos in range(8):
+                    x = decks[k][pos]
                     for y in pool:
-                        if not compatibles(x, y):
+                        pen = penalite_remplacement(y, x, stats)
+                        if pen is None:
                             continue
                         avant_k = list(decks[k])
                         decks[k][pos] = y
-                        gain = objectif(decks) - courant - (EVO_PERTE if evos[k][pos] else 0.0)
+                        gain = objectif(decks) - courant - pen - (EVO_PERTE if evos[k][pos] else 0.0)
                         ok = coherent_apres_changement(avant_k, decks[k], stats)
                         decks[k][pos] = x
                         if ok and gain >= GAIN_MINIMUM and (meilleur is None or gain > meilleur[0]):
-                            meilleur = (gain, "remplace", k, pos, y, None, None)
-        if not meilleur:
+                            meilleur = (gain, k, pos, y, pen + (EVO_PERTE if evos[k][pos] else 0.0))
+            if not meilleur:
+                break
+            _, k, pos, y, malus = meilleur
+            x = decks[k][pos]
+            decks[k][pos] = y
+            evos[k][pos] = False
+            pool.discard(y)
+            nb[k] += 1
+            cout += malus
+            changements.append((k, x, y, None))
+        return objectif(decks) - obj0 - cout, decks, changements
+
+    meilleur_resultat = lancer()
+    # départs « deux changements d'un coup » : la meilleure paire de chaque deck modifiable
+    for k in range(min(n, nb_modifiables)):
+        if limite < 2:
             break
-        _, genre, k, pos, y, _j, _pos2 = meilleur
-        x = decks[k][pos]
-        decks[k][pos] = y
-        evos[k] = list(evos[k])
-        evos[k][pos] = False
-        pool.discard(y)
-        nb[k] += 1
-        changements.append((k, x, y, None))
+        simples = []
+        for pos, x in enumerate(depart[k]):
+            for y in pool0:
+                pen = penalite_remplacement(y, x, stats)
+                if pen is not None:
+                    simples.append((pos, y, pen + (EVO_PERTE if evos0[k][pos] else 0.0)))
+        base_k = note_deck(depart[k], stats, p0, profil)
+        meilleure = None
+        for a in range(len(simples)):
+            pa, ya, qa = simples[a]
+            for b in range(a + 1, len(simples)):
+                pb, yb, qb = simples[b]
+                if pa == pb or ya == yb:
+                    continue
+                nouveau = list(depart[k])
+                nouveau[pa], nouveau[pb] = ya, yb
+                if not coherent_apres_changement(depart[k], nouveau, stats):
+                    continue
+                gain = note_deck(nouveau, stats, p0, profil) - base_k - qa - qb
+                if gain >= 2 * GAIN_MINIMUM and (meilleure is None or gain > meilleure[0]):
+                    meilleure = (gain, [(pa, ya), (pb, yb)], qa + qb)
+        if meilleure:
+            essai = lancer((k, meilleure[1], meilleure[2]))
+            if essai[0] > meilleur_resultat[0] + 0.002:
+                meilleur_resultat = essai
+    _, decks, changements = meilleur_resultat
     return decks, changements
 
 
@@ -1142,12 +1227,54 @@ def defense_aerienne(ids, stats):
     return sum(1 for n in noms if n in ANTI_AIR)
 
 
+# Cartes qui servent à défendre contre les airs : à dégâts de zone (nuées, Ballon accompagné) ou à dégâts ciblés (gros air seul)
+ZONE_AIR = {"Arrows", "Fireball", "Lightning", "Poison", "Baby Dragon", "Wizard", "Witch", "Mother Witch", "Executioner",
+            "Minion Horde", "Electro Dragon", "Bats", "Skeleton Dragons", "Void"}
+CIBLE_AIR = {"Inferno Tower", "Inferno Dragon", "Tesla", "Musketeer", "Hunter", "Mega Minion", "Archers", "Firecracker", "Magic Archer",
+             "Electro Wizard", "Dart Goblin", "Three Musketeers", "Archer Queen", "Little Prince", "Phoenix", "Zappies", "Princess"}
+TEXTE_PROBLEME = {
+    "victoire": "aucune carte de victoire reconnue",
+    "sorts0": "aucun sort",
+    "sorts4": "plus de 3 sorts (peu de troupes pour défendre)",
+    "sol": "peu de cartes pour défendre au sol (moins de 4 troupes ou bâtiments)",
+    "elixir": "élixir moyen très bas ou très haut",
+    "air_zone": "aucune réponse à dégâts de zone contre les airs (nuées, Ballon accompagné)",
+    "air_cible": "peu de dégâts ciblés contre un gros air (Ballon, Meute de lave)",
+}
+
+
+def problemes_structure(ids, stats):
+    """Les faiblesses de structure d'un deck (ensemble de clés de TEXTE_PROBLEME) ; vide si on ne connaît pas les 8 cartes."""
+    noms = [stats[i]["name"] for i in ids if i in stats]
+    if len(noms) < 8:
+        return set()
+    res = set()
+    if not any(n in CARTES_VICTOIRE for n in noms):
+        res.add("victoire")
+    nb_sorts = sum(1 for n in noms if role(n) == "sort")
+    if nb_sorts == 0:
+        res.add("sorts0")
+    elif nb_sorts > 3:
+        res.add("sorts4")
+    if sum(1 for n in noms if role(n) in ("troupe", "batiment")) < 4:
+        res.add("sol")
+    couts = [stats[i]["elixir"] for i in ids if stats[i].get("elixir")]
+    if len(couts) == 8 and not 2.4 <= sum(couts) / 8 <= 4.6:
+        res.add("elixir")
+    if not any(n in ZONE_AIR for n in noms):
+        res.add("air_zone")
+    if not any(n in CIBLE_AIR for n in noms):
+        res.add("air_cible")
+    return res
+
+
 def coherent_apres_changement(avant, apres, stats):
-    """Un changement ne doit pas faire passer la défense aérienne sous le minimum ni l'aggraver."""
+    """Un changement ne doit ni faire passer la défense aérienne sous le minimum, ni créer une nouvelle faiblesse de structure
+    (carte de victoire, sorts, défense au sol, élixir, réponses aux airs). Une faiblesse déjà présente n'est pas bloquante."""
     a, b = defense_aerienne(avant, stats), defense_aerienne(apres, stats)
-    if a is None or b is None:
-        return True
-    return b >= min(a, MIN_ANTI_AIR)
+    if a is not None and b is not None and b < min(a, MIN_ANTI_AIR):
+        return False
+    return not (problemes_structure(apres, stats) - problemes_structure(avant, stats))
 
 
 def points_attention(ids, stats, profil):
@@ -1519,6 +1646,7 @@ def construire_reponse(mode, decks, tag, devine):
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
+    notes += [f"structure : {TEXTE_PROBLEME[k]}" for k in sorted(problemes_structure(ids, stats)) if k in ("victoire", "sorts0", "sorts4", "sol", "elixir", "air_zone", "air_cible")]
     if absentes:
         notes.append("ne figure(nt) pas dans ton profil : " + ", ".join(nom_fr(stats[i]["name"]) if i in stats else f"carte {i}" for i in absentes))
     non_poss = formes_non_possedees(ids, slots, profil)
