@@ -31,8 +31,8 @@ MIN_ARCHETYPE = 5                 # parties contre un même type de deck avant d
 MIN_CARTE_ADVERSE = 5             # apparitions d'une carte adverse avant d'en parler
 MIN_PAR_TRANCHE = 8               # combats minimum par tranche horaire / situation
 MAX_DEMANDES = 3                  # demandes traitées par passage (chaque analyse fait des appels à l'API)
-Z_MIN = 1.2                       # une différence n'est annoncée que si elle dépasse le hasard (≈ 88 % de certitude)
-Z_SOLIDE = 1.64                   # au-delà (≈ 95 %), on n'ajoute pas « tendance »
+Z_TENDANCE = 1.2                  # à partir de là (≈ 88 % de certitude) on signale une tendance, sans en faire une priorité
+Z_MIN = 1.64                      # à partir de là (≈ 95 %) l'observation est jugée solide et peut entrer dans le plan d'action
 MIN_HISTORIQUE = 40               # combats en mémoire pour afficher la section « Ton historique »
 
 # Historique permanent
@@ -66,28 +66,50 @@ def v(*options):
     return RNG.choice(options)
 
 
+TUEURS_TANK = {"P.E.K.K.A", "Mini P.E.K.K.A", "Inferno Tower", "Inferno Dragon", "Hunter", "Prince", "Sparky", "Mighty Miner", "Executioner"}
+CARTES_RAPIDES = {"Hog Rider", "Battle Ram", "Miner", "Ram Rider", "Royal Hogs", "Goblin Barrel", "Skeleton Barrel", "Goblin Drill"}
+
+
 def traits_deck(cartes):
     """Ce que le deck du joueur contient vraiment (pour ne pas lui conseiller d'utiliser ce qu'il n'a pas)."""
     noms = {c.get("name") for c in cartes or []}
     return {"batiment": bool(noms & d.BATIMENTS), "sort": bool(noms & d.SORTS), "degats": bool(noms & GROS_DEGATS),
-            "anti_air": sum(1 for n in noms if n in d.ANTI_AIR), "connu": bool(noms)}
+            "anti_air": sum(1 for n in noms if n in d.ANTI_AIR), "connu": bool(noms),
+            "zone_air": bool(noms & d.ZONE_AIR), "cible_air": bool(noms & d.CIBLE_AIR),
+            "tueur_tank": bool(noms & TUEURS_TANK), "rapide": bool(noms & CARTES_RAPIDES)}
+
+
+def manque_de_reponse(plan, t):
+    """Ce qui manque réellement au deck du joueur pour répondre à ce type de deck adverse (texte), ou None s'il a de quoi répondre."""
+    if not t["connu"]:
+        return None
+    if plan == "air":
+        if t["anti_air"] < 2:
+            return "ton deck a peu de réponses aériennes : contre Ballon et Meute de lave, c'est ton vrai point faible. Ajoute une carte qui touche les airs."
+        if not t["cible_air"]:
+            return "tu n'as pas de dégâts ciblés contre un gros air (Ballon, Meute de lave) : ajoute une Tour infernale, un Mousquetaire ou un Chasseur."
+        if not t["zone_air"]:
+            return "tu n'as pas de dégâts de zone contre les airs : les nuées aériennes (Horde de serviteurs, Bébé dragon) vont te poser problème."
+    if plan in ("tank", "lourd") and not t["tueur_tank"]:
+        return "ton deck n'a pas de vrai tueur de tank (Tour infernale, Mini P.E.K.K.A, Chasseur…) : c'est ton vrai point faible ici."
+    if plan == "siege" and not (t["sort"] or t["rapide"]):
+        return "ton deck n'a ni sort ni carte rapide pour détruire un siège : ajoutes-en une."
+    return None
 
 
 def conseil_plan(plan, deck=None):
-    """Conseil contre un type de deck adverse, adapté aux cartes du deck du joueur quand on le connaît."""
+    """Conseil contre un type de deck adverse. Si on connaît le deck du joueur, on vérifie d'abord qu'il a de quoi répondre :
+    sinon le conseil dit ce qui manque, plutôt que de supposer des cartes qu'il n'a pas."""
     t = traits_deck(deck)
+    manque = manque_de_reponse(plan, t)
+    if manque:
+        return manque + " En attendant, " + v("contre-attaque sur l'autre voie dès qu'il investit.", "ne défends pas à perte : punis-le sur l'autre voie.")
     if plan == "air":
-        if t["connu"] and t["anti_air"] < 2:
-            return ("ton deck a peu de réponses aériennes : contre Ballon et Meute de lave, c'est ton vrai point faible. "
-                    "Pense à ajouter une carte qui touche les airs.")
         reserve = [x for x, ok in (("ton sort", t["sort"] or not t["connu"]), ("ton bâtiment", t["batiment"] or not t["connu"])) if ok]
         r = " et ".join(reserve) if reserve else "tes cartes anti-air"
         return v(f"garde toujours de quoi défendre dans les airs et ne le gaspille pas en attaque ; {r} doit rester dispo pour Ballon / Meute de lave.",
                  f"réserve ta réponse aérienne pour la défense, et vérifie que {r} est prêt quand le Ballon ou la Meute de lave arrive.")
     if plan == "tank":
-        if t["connu"] and not t["degats"]:
-            return v("dès que le tank est posé, contre-attaque sur l'autre voie et défends avec plusieurs unités à la fois plutôt qu'une seule.",
-                     "contre un gros tank, ne défends pas avec une seule carte : empile tes unités et contre-attaque sur l'autre voie.")
         return v("punis le tank : attaque l'autre voie dès qu'il le pose, et réserve ton meilleur dégât pur pour le tuer au pont.",
                  "dès que le tank est posé, contre-attaque sur l'autre voie ; garde ton plus gros dégât pour l'arrêter au pont.")
     if plan == "siege":
@@ -293,7 +315,7 @@ def z_ecart(g1, w1, g2, w2):
 
 def tendance(z):
     """« (tendance) » quand l'écart est net mais pas encore solide."""
-    return " *(tendance)*" if z < Z_SOLIDE else ""
+    return " *(tendance, à confirmer)*" if z < Z_MIN else ""
 
 
 def plan_adverse(cartes):
@@ -373,7 +395,7 @@ def betes_noires(combats):
             continue
         autres = (vict - w) / (n - g)
         z = z_ecart(n - g, vict - w, g, w)
-        if w / g <= autres - 0.15 and z >= 1.0:
+        if w / g <= autres - 0.15 and z >= Z_TENDANCE:
             mauvais.append((p, g, w, z))
     mauvais.sort(key=lambda x: (x[2] / x[1], -x[1]))
     cartes = {}
@@ -414,7 +436,7 @@ def moments(combats):
     pire = min(res.items(), key=lambda x: x[1][1] / x[1][0])
     ecart = meilleur[1][1] / meilleur[1][0] - pire[1][1] / pire[1][0]
     z = z_ecart(meilleur[1][0], meilleur[1][1], pire[1][0], pire[1][1])
-    if ecart < 0.20 or z < Z_MIN:
+    if ecart < 0.20 or z < Z_TENDANCE:
         return "neutre", None
     return "ok", (meilleur, pire, z)
 
@@ -620,7 +642,7 @@ def vitesse_pire(va):
         autres_g = sum(x[0] for k, x in va.items() if k != nom)
         autres_w = sum(x[1] for k, x in va.items() if k != nom)
         z = z_ecart(autres_g, autres_w, g, w)
-        if w / g <= autres_w / autres_g - 0.15 and z >= 1.0:
+        if w / g <= autres_w / autres_g - 0.15 and z >= Z_TENDANCE:
             return nom, g, w, z
         break
     return None
@@ -702,9 +724,9 @@ def analyse_historique(tous):
     if notes:
         haut, bas = max(notes, key=lambda x: x[0]), min(notes, key=lambda x: x[0])
         morceaux = []
-        if haut[0] >= 1.5 and haut[1]["w"] / haut[1]["g"] - (vict - haut[1]["w"]) / (n - haut[1]["g"]) >= 0.10:
+        if haut[0] >= Z_MIN and haut[1]["w"] / haut[1]["g"] - (vict - haut[1]["w"]) / (n - haut[1]["g"]) >= 0.10:
             morceaux.append(f"✅ {d.nom_fr(haut[1]['nom'])} `{pct(haut[1]['w'], haut[1]['g'])}` ({haut[1]['g']})")
-        if bas[0] <= -1.5 and (vict - bas[1]["w"]) / (n - bas[1]["g"]) - bas[1]["w"] / bas[1]["g"] >= 0.10:
+        if bas[0] <= -Z_MIN and (vict - bas[1]["w"]) / (n - bas[1]["g"]) - bas[1]["w"] / bas[1]["g"] >= 0.10:
             morceaux.append(f"⚠️ {d.nom_fr(bas[1]['nom'])} `{pct(bas[1]['w'], bas[1]['g'])}` ({bas[1]['g']})")
         if morceaux:
             lignes.append("🎴 Quand tu les joues : " + " · ".join(morceaux))
@@ -723,9 +745,9 @@ def analyse_historique(tous):
         marque = ""
         if autres_g >= 8:
             z = z_ecart(g, w, autres_g, autres_w)
-            if z >= 1.0 and w / g >= autres_w / autres_g + 0.12:
+            if z >= Z_MIN and w / g >= autres_w / autres_g + 0.12:
                 marque = "✅ "
-            elif z <= -1.0 and w / g <= autres_w / autres_g - 0.12:
+            elif z <= -Z_MIN and w / g <= autres_w / autres_g - 0.12:
                 marque = "⚠️ "
         morceaux.append(f"{marque}{NOM_PLAN[plan]} {w}/{g}")
     if morceaux:
@@ -744,7 +766,7 @@ def analyse_historique(tous):
         meilleur = max(valides.items(), key=lambda x: x[1][1] / x[1][0])
         pire = min(valides.items(), key=lambda x: x[1][1] / x[1][0])
         z = z_ecart(meilleur[1][0], meilleur[1][1], pire[1][0], pire[1][1])
-        if z >= Z_MIN and meilleur[1][1] / meilleur[1][0] - pire[1][1] / pire[1][0] >= 0.12:
+        if z >= Z_TENDANCE and meilleur[1][1] / meilleur[1][0] - pire[1][1] / pire[1][0] >= 0.12:
             lignes.append(f"⚡ Tu gagnes plus avec des {meilleur[0]} (`{pct(meilleur[1][1], meilleur[1][0])}`) "
                           f"qu'avec des {pire[0]} (`{pct(pire[1][1], pire[1][0])}`){tendance(z)}")
     return lignes
@@ -760,7 +782,10 @@ class Priorites:
     def __init__(self):
         self.liste = []
 
-    def ajouter(self, cle, texte, impact, n):
+    def ajouter(self, cle, texte, impact, n, solide=True):
+        """Ajoute un conseil au plan d'action, seulement si l'observation est solide (écart au-delà du hasard, Z_MIN)."""
+        if not solide:
+            return
         for e in self.liste:
             if e["cle"] == cle and cle == "niveaux":
                 e["texte"] += "\n↳ " + texte.split(" : ", 1)[-1]
@@ -836,10 +861,10 @@ def construire(tag):
     fo = forme(profil_brut, b)
     if fo:
         glob, rec, z_f = fo
-        txt = f"Ces derniers combats : `{100 * rec:.0f}%` de victoires · sur toute ta carrière : `{100 * glob:.0f}%`"
-        if rec - glob >= 0.10 and z_f >= 1.0:
+        txt = f"Ces derniers combats : `{100 * rec:.0f}%` de victoires (sur {b['v'] + b['l']} combats) · sur toute ta carrière : `{100 * glob:.0f}%`"
+        if rec - glob >= 0.10 and z_f >= Z_TENDANCE:
             txt += "\n🔥 " + v("Tu es en forme : au-dessus de ta moyenne habituelle.", "Bonne passe : tu fais mieux que d'habitude.", "Tu joues au-dessus de ton niveau moyen en ce moment.") + tendance(z_f)
-        elif glob - rec >= 0.10 and -z_f >= 1.0:
+        elif glob - rec >= 0.10 and -z_f >= Z_TENDANCE:
             txt += "\n📉 " + v("Tu es en dessous de ta moyenne habituelle : change peut-être une carte, ou fais une pause.", "Passage à vide : tu fais moins bien que d'habitude. Une pause peut aider.", "Tes résultats sont sous ta moyenne : ajuste ton deck ou souffle un peu.") + tendance(-z_f)
         sections1.append("**📈 Ta forme du moment**\n" + txt)
 
@@ -894,11 +919,11 @@ def construire(tag):
             if sous[0] >= 4 and egal_sur[0] >= 4:
                 z_n = z_ecart(egal_sur[0], egal_sur[1], sous[0], sous[1])
                 ecart_n = egal_sur[1] / egal_sur[0] - sous[1] / sous[0]
-                if ecart_n >= 0.20 and z_n >= Z_MIN:
+                if ecart_n >= 0.20 and z_n >= Z_TENDANCE:
                     niveaux_sous = True
                     txt += "\n⚠️ " + v("Tu perds surtout quand tes cartes sont moins hautes que celles de l'adversaire.", "Tes défaites tombent surtout quand tu es sous-niveau.", "Le niveau pèse : tu gagnes nettement moins quand l'adversaire est plus haut.") + tendance(z_n)
                     prio.ajouter("niveaux", "**Niveaux** : " + v("tes défaites viennent surtout des combats où tu es sous-niveau : monte tes cartes avant de changer de deck.", "avant de toucher à ton deck, monte tes cartes : c'est là que tu perds des points.", "tes cartes sont trop basses face à certains adversaires : le niveau avant le deck."),
-                                 ecart_n * sous[0] / (sous[0] + egal_sur[0]), sous[0] + egal_sur[0])
+                                 ecart_n * sous[0] / (sous[0] + egal_sur[0]), sous[0] + egal_sur[0], solide=z_n >= Z_MIN)
             sections2.append("**⚖️ Niveaux des cartes**\n" + txt)
     fp = facon_de_perdre(tous)
     if fp:
@@ -921,7 +946,7 @@ def construire(tag):
             txt.append(f"• Contre les **{NOM_PLAN[plan]}** : {w}/{g} (`{pct(w, g)}`){tendance(z_plans.get(plan, 0))}")
             base_autres = (sum(1 for c in tous if c["win"]) - w) / max(1, termines_tous - g)
             prio.ajouter("plan-" + plan, f"**{NOM_PLAN[plan].capitalize()}** : {conseil_plan(plan, cartes_deck)}",
-                         max(0.0, base_autres - w / g) * g / termines_tous, g)
+                         max(0.0, base_autres - w / g) * g / termines_tous, g, solide=z_plans.get(plan, 0) >= Z_MIN)
         if noires:
             txt.append("• Cartes qui reviennent dans tes défaites : "
                        + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu {e['d']}/{e['g']})" for e in noires))
@@ -945,7 +970,7 @@ def construire(tag):
                               "lourds": ("contre un deck lourd, ne laisse pas leur élixir se remplir : mets la pression pendant qu'ils investissent.",
                                          "ne laisse pas un deck lourd poser tranquillement : attaque pendant qu'il dépense.")}[court])
                 autres_v = (sum(x[1] for k, x in va.items() if k != nom_v)) / max(1, sum(x[0] for k, x in va.items() if k != nom_v))
-                prio.ajouter("vitesse", f"**Decks {court}** : {conseil}", max(0.0, autres_v - w_v / g_v) * g_v / termines_tous, g_v)
+                prio.ajouter("vitesse", f"**Decks {court}** : {conseil}", max(0.0, autres_v - w_v / g_v) * g_v / termines_tous, g_v, solide=z_v >= Z_MIN)
         sections2.append("**🏎️ Vitesse des decks adverses**\n" + txt)
     if el:
         txt = f"Élixir perdu en moyenne : `{el['moy']:.1f}` par combat"
@@ -955,24 +980,25 @@ def construire(tag):
             txt += "\n⚠️ " + v("Tu laisses ton élixir plein trop souvent, surtout quand tu perds.", "Ton élixir déborde trop souvent, surtout dans tes défaites.", "Tu gaspilles de l'élixir en laissant la jauge pleine, surtout quand tu perds.")
             prio.ajouter("elixir", "**Élixir** : " + v("pose une carte dès que tu approches des 10 : un élixir perdu est un échange offert à l'adversaire.", "ne reste pas à 10 : joue une petite carte plutôt que de laisser déborder.", "une jauge pleine, c'est de l'élixir perdu : pose quelque chose avant d'y arriver."),
                          0.03 + min(0.03, max(0.0, el["moy"] - 1.5) * 0.02), el["n"])
+        txt += f"\n-# Mesuré sur {el['n']} combats ; le jeu ne donne pas la durée d'un combat, un combat long et un combat court pèsent donc pareil."
         sections2.append("**⚡ Gestion de l'élixir**\n" + txt)
     txt = []
     if ti:
         (g1, w1), (g2, w2) = ti
         txt.append(f"Après une défaite : `{pct(w1, g1)}` de victoires ({g1} combats) · après une victoire : `{pct(w2, g2)}` ({g2})")
         z_t = z_ecart(g2, w2, g1, w1)
-        if w2 / g2 - w1 / g1 >= 0.15 and z_t >= Z_MIN:
+        if w2 / g2 - w1 / g1 >= 0.15 and z_t >= Z_TENDANCE:
             txt.append("⚠️ " + v("Tu joues moins bien juste après une défaite.", "Une défaite te déstabilise : tu rejoues moins bien juste après.", "Tes combats après une défaite sont plus faibles.") + tendance(z_t))
             prio.ajouter("tilt", "**Après une défaite** : " + v("fais une pause de quelques minutes avant de relancer, ça rapporte plus que d'enchaîner.", "respire cinq minutes avant le combat suivant : enchaîner à chaud te coûte.", "ne relance pas tout de suite : une courte pause améliore le combat suivant."),
-                         (w2 / g2 - w1 / g1) * taux_def, g1 + g2)
+                         (w2 / g2 - w1 / g1) * taux_def, g1 + g2, solide=z_t >= Z_MIN)
     if fa:
         (gd, wd), (gf, wf) = fa
         txt.append(f"Dans une session : combats 1 à 3 `{pct(wd, gd)}` ({gd}) · à partir du 6ᵉ `{pct(wf, gf)}` ({gf})")
         z_fa = z_ecart(gd, wd, gf, wf)
-        if wd / gd - wf / gf >= 0.15 and z_fa >= Z_MIN:
+        if wd / gd - wf / gf >= 0.15 and z_fa >= Z_TENDANCE:
             txt.append("⚠️ " + v("Tu fatigues : tes résultats chutent quand tu enchaînes les combats.", "Plus tu enchaînes, moins tu gagnes.", "La fatigue se voit : tes résultats baissent en fin de session.") + tendance(z_fa))
             prio.ajouter("fatigue", "**Fatigue** : " + v("arrête-toi après 5 combats d'affilée, ou fais une pause avant de continuer : tes résultats baissent nettement après le 6ᵉ.", "limite tes sessions à 5 combats : ça baisse nettement à partir du 6ᵉ.", "fais une vraie pause au bout de 5 combats : au-delà, tu perds plus."),
-                         (wd / gd - wf / gf) * gf / (gd + gf), gd + gf)
+                         (wd / gd - wf / gf) * gf / (gd + gf), gd + gf, solide=z_fa >= Z_MIN)
     if statut_mo == "ok":
         (n1, (g1, w1)), (n2, (g2, w2)), z_m = mo
         txt.append(f"Ton meilleur créneau : {n1} (`{pct(w1, g1)}`, {g1} combats) · le moins bon : {n2} (`{pct(w2, g2)}`, {g2}){tendance(z_m)}")
@@ -982,6 +1008,8 @@ def construire(tag):
         txt.append("-# Horaires : pas assez de combats par créneau (il en faut 8) pour conclure.")
     if txt:
         sections2.append("**🧠 Mental, fatigue et horaires**\n" + "\n".join(txt))
+    sections2.append("-# Lecture indicative : ce sont des écarts constatés sur tes combats récents (nombres entre parenthèses = combats concernés), pas des certitudes. "
+                     "Seuls les écarts nets (au-delà du hasard) entrent dans le plan d'action.")
     embeds.append({"title": "🔬 Comment tu joues", "color": 15105570, "description": d.assembler(sections2)})
 
     # ===== Embed 3 : ton historique =====
