@@ -5,8 +5,9 @@ on:
     - cron: '*/10 * * * *'   # toutes les 10 minutes : lit le salon du coach et répond (GitHub peut retarder)
   workflow_dispatch:
 
+# Écriture : le coach range l'historique des combats des joueurs dans le dépôt (dossier historique/)
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: coach
@@ -34,3 +35,17 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_COACH }}
         run: python Coach.py repondre
+
+      - name: Sauvegarde de l'historique des combats
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -d historique ]; then git add historique; fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Historique des combats (coach)"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              sleep 5
+            done
+          fi
