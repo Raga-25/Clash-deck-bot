@@ -410,6 +410,81 @@ def betes_noires(combats):
     return plans, [(p, g, w) for p, g, w, _ in mauvais], cartes_noires, {p: z for p, g, w, z in mauvais}, base
 
 
+MIN_PLAN_PAR_DECK = 5             # parties d'UN deck contre un type adverse avant d'en parler
+MIN_DECK_TOTAL = 12               # combats terminés avec un deck avant d'analyser ses résultats à part
+
+
+def cle_deck(c):
+    return tuple(sorted(x["id"] for x in c["mes"]))
+
+
+def noms_decks(decks):
+    """Un nom court par deck (sa carte de victoire, sinon sa première carte) ; numéroté si deux decks ont la même."""
+    noms, vus = {}, {}
+    for cle, e in decks.items():
+        cartes = [x.get("name", "?") for x in e["cartes"]]
+        base = next((n for n in cartes if n in d.CARTES_VICTOIRE), cartes[0] if cartes else "?")
+        vus[base] = vus.get(base, 0) + 1
+        noms[cle] = d.nom_fr(base) + (f" ({vus[base]})" if vus[base] > 1 else "")
+    return noms
+
+
+def resultats_par_deck(combats):
+    """Pour chacun de TES decks : combats terminés, victoires, et résultats contre chaque type de deck adverse."""
+    decks = {}
+    for c in combats:
+        if not (c["win"] or c["loss"]) or not c["mes"]:
+            continue
+        e = decks.setdefault(cle_deck(c), {"cartes": c["mes"], "n": 0, "v": 0, "plans": {}})
+        e["n"] += 1
+        e["v"] += c["win"]
+        p = e["plans"].setdefault(plan_adverse(c["adv"])[1], [0, 0])
+        p[0] += 1
+        p[1] += c["win"]
+    return decks
+
+
+def lecture_plan_par_deck(decks, plan):
+    """Contre un type de deck adverse, est-ce un problème de TON deck précis ou de tous tes decks ?
+    Renvoie (statut, détail) : « un_deck » (un deck concentre le problème, les autres s'en sortent), « tous » (aucun de tes decks n'y arrive),
+    ou « inconnu » (un seul deck testé, ou trop peu de parties pour savoir)."""
+    lignes = [(cle, e["plans"][plan][0], e["plans"][plan][1]) for cle, e in decks.items() if plan in e["plans"]]
+    sérieux = [x for x in lignes if x[1] >= MIN_PLAN_PAR_DECK]
+    if len(sérieux) < 2:
+        return "inconnu", None
+    meilleur_cas = None
+    for cle, g, w in sérieux:
+        autres_g = sum(x[1] for x in lignes if x[0] != cle)
+        autres_w = sum(x[2] for x in lignes if x[0] != cle)
+        if autres_g < MIN_PLAN_PAR_DECK:
+            continue
+        z = z_ecart(autres_g, autres_w, g, w)
+        if w / g <= autres_w / autres_g - 0.15 and z >= Z_TENDANCE and (meilleur_cas is None or z > meilleur_cas[0]):
+            meilleur_cas = (z, cle, g, w, autres_g, autres_w)
+    if meilleur_cas:
+        return "un_deck", meilleur_cas
+    if all(w / g <= 0.45 for _, g, w in sérieux):
+        return "tous", sérieux
+    return "inconnu", None
+
+
+def betes_noires_propres_a_un_deck(decks, deja):
+    """Problèmes qu'un seul de tes decks rencontre et que la moyenne de tous tes combats cache : (cle_deck, plan, g, w, z)."""
+    res = []
+    for cle, e in decks.items():
+        if e["n"] < MIN_DECK_TOTAL:
+            continue
+        for plan, (g, w) in e["plans"].items():
+            if plan in deja or plan == "autre" or g < MIN_PLAN_PAR_DECK or e["n"] - g < MIN_PLAN_PAR_DECK:
+                continue
+            autres_g, autres_w = e["n"] - g, e["v"] - w
+            z = z_ecart(autres_g, autres_w, g, w)
+            if w / g <= autres_w / autres_g - 0.20 and z >= Z_MIN:
+                res.append((cle, plan, g, w, z))
+    res.sort(key=lambda x: -x[4])
+    return res[:2]
+
+
 def elixir(combats):
     vic = [c["fuite"] for c in combats if c["fuite"] is not None and c["win"]]
     per = [c["fuite"] for c in combats if c["fuite"] is not None and c["loss"]]
@@ -940,13 +1015,35 @@ def construire(tag):
             prio.ajouter("attaque", "**Attaque** : " + v("tu perds sans marquer. Mets de la pression sur la voie opposée quand l'adversaire pose sa carte principale, et garde une carte de dégâts pour la tour.", "quand l'adversaire dépense sa carte principale, attaque l'autre voie et garde un dégât pour la tour.", "force l'adversaire à défendre : lance une attaque sur la voie opposée dès qu'il investit.") + suite,
                          part_def * fp["zero"] / fp["n"] * 0.2, fp["n"] * 2)
         sections2.append("**🥊 Comment tu perds**\n" + txt)
-    if mauvais or noires:
+    par_deck = resultats_par_deck(tous)
+    noms_d = noms_decks(par_deck)
+    propres = betes_noires_propres_a_un_deck(par_deck, {p for p, _, _ in mauvais})
+    if mauvais or noires or propres:
         txt = []
         for plan, g, w in mauvais[:2]:
-            txt.append(f"• Contre les **{NOM_PLAN[plan]}** : {w}/{g} (`{pct(w, g)}`){tendance(z_plans.get(plan, 0))}")
+            statut, det = lecture_plan_par_deck(par_deck, plan)
+            cartes_conseil = cartes_deck
+            ligne = f"• Contre les **{NOM_PLAN[plan]}** : {w}/{g} (`{pct(w, g)}`){tendance(z_plans.get(plan, 0))}"
+            if statut == "un_deck":
+                z_u, cle_u, g_u, w_u, ag, aw = det
+                ligne += (f"\n   ↳ C'est surtout **ton deck {noms_d[cle_u]}** : {w_u}/{g_u} (`{pct(w_u, g_u)}`), "
+                          f"alors que tes autres decks font {aw}/{ag} (`{pct(aw, ag)}`)")
+                cartes_conseil = par_deck[cle_u]["cartes"]
+            elif statut == "tous":
+                ligne += "\n   ↳ Quel que soit le deck que tu joues : le problème n'est pas une carte en particulier"
+            txt.append(ligne)
             base_autres = (sum(1 for c in tous if c["win"]) - w) / max(1, termines_tous - g)
-            prio.ajouter("plan-" + plan, f"**{NOM_PLAN[plan].capitalize()}** : {conseil_plan(plan, cartes_deck)}",
+            texte_conseil = conseil_plan(plan, cartes_conseil)
+            if statut == "un_deck":
+                texte_conseil = f"avec ton deck {noms_d[cle_u]} : " + texte_conseil + " Ou joue plutôt tes autres decks contre ce type d'adversaire."
+            prio.ajouter("plan-" + plan, f"**{NOM_PLAN[plan].capitalize()}** : {texte_conseil}",
                          max(0.0, base_autres - w / g) * g / termines_tous, g, solide=z_plans.get(plan, 0) >= Z_MIN)
+        for cle_u, plan, g_u, w_u, z_u in propres:
+            ag, aw = par_deck[cle_u]["n"] - g_u, par_deck[cle_u]["v"] - w_u
+            txt.append(f"• Avec **ton deck {noms_d[cle_u]}** seulement : contre les **{NOM_PLAN[plan]}**, {w_u}/{g_u} (`{pct(w_u, g_u)}`) "
+                       f"contre {aw}/{ag} (`{pct(aw, ag)}`) face aux autres types")
+            prio.ajouter("plan-deck-" + plan, f"**{NOM_PLAN[plan].capitalize()}, avec {noms_d[cle_u]}** : {conseil_plan(plan, par_deck[cle_u]['cartes'])}",
+                         max(0.0, aw / ag - w_u / g_u) * g_u / termines_tous, g_u, solide=True)
         if noires:
             txt.append("• Cartes qui reviennent dans tes défaites : "
                        + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu {e['d']}/{e['g']})" for e in noires))
