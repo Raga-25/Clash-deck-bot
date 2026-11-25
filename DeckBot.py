@@ -471,6 +471,16 @@ def _wilson(g, w, z=1.96):
     return (p + z * z / (2 * g) - z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)) / (1 + z * z / g)
 
 
+def _wilson_bornes(g, w, z=1.96):
+    """Intervalle de confiance (≈95 %) d'un taux de victoire observé : (borne basse, borne haute)."""
+    if g <= 0:
+        return 0.0, 1.0
+    p = w / g
+    centre = p + z * z / (2 * g)
+    marge = z * math.sqrt((p * (1 - p) + z * z / (4 * g)) / g)
+    return (centre - marge) / (1 + z * z / g), (centre + marge) / (1 + z * z / g)
+
+
 MIN_PARTIES_BIEN_MONTE = 15      # deck « bien monté » : un deck gagnant d'au moins 15 parties...
 NIVEAUX_MANQUANTS_BIEN_MONTE = 1 # ...dont on ne garde que les cartes que tu as au niveau 15 ou 16 (le reste est remplacé)
 MIN_PARTIES_MEILLEUR = 25        # pour proposer « le mieux classé » : au moins 25 parties
@@ -546,12 +556,12 @@ def deck_bien_monte(mode, profil, stats, p0, evo_ids=frozenset()):
                              key=lambda pos: -(manque(profil[cartes[pos]]) if cartes[pos] in profil else 9))   # la plus en retard d'abord
         for pos in a_remplacer:
             c = cartes[pos]
-            candidats = [e for e in pool if e not in nouveau and penalite_remplacement(e, c, stats) is not None]
+            candidats = [e for e in pool if e not in nouveau and penalite_remplacement(e, c, stats, cartes) is not None]
             if not candidats:
                 nouveau = None
                 break
             e = max(candidats, key=lambda x: note_deck(nouveau[:pos] + [x] + nouveau[pos + 1:], stats, p0, profil)
-                    - penalite_remplacement(x, c, stats))
+                    - penalite_remplacement(x, c, stats, cartes))
             echanges.append((c, e))
             nouveau[pos] = e
         if nouveau is None or not coherent_apres_changement(cartes, nouveau, stats):
@@ -889,17 +899,48 @@ PENALITE_ELIXIR_1 = 0.002       # un point d'élixir de plus que l'écart tolér
 PENALITE_ELIXIR_2 = 0.006       # deux points de plus ; au-delà, interdit
 
 
-def penalite_remplacement(entrant, sortant, stats):
+# Cartes qui servent à défendre contre les airs : à dégâts de zone (nuées, Ballon accompagné) ou à dégâts ciblés (gros air seul)
+ZONE_AIR = {"Arrows", "Fireball", "Lightning", "Poison", "Baby Dragon", "Wizard", "Witch", "Mother Witch", "Executioner",
+            "Minion Horde", "Electro Dragon", "Bats", "Skeleton Dragons", "Void"}
+CIBLE_AIR = {"Inferno Tower", "Inferno Dragon", "Tesla", "Musketeer", "Hunter", "Mega Minion", "Archers", "Firecracker", "Magic Archer",
+             "Electro Wizard", "Dart Goblin", "Three Musketeers", "Archer Queen", "Little Prince", "Phoenix", "Zappies", "Princess"}
+PENALITE_ROLE = 0.006           # changer de rôle général quand c'est permis (troupe <-> bâtiment, ou carte qui comble une faiblesse)
+CORRIGE = {"air_zone": ZONE_AIR, "air_cible": CIBLE_AIR}        # faiblesses qu'une carte d'un autre rôle peut combler
+
+
+def role_croise_permis(entrant, sortant, stats, ids):
+    """Un changement de rôle général n'est permis que dans deux cas : une troupe et un bâtiment (deux façons de défendre au sol),
+    ou une carte qui comble une faiblesse précise du deck (par exemple une réponse aux airs qui manque). Jamais une carte de victoire,
+    et jamais un sort contre une troupe sans faiblesse à corriger."""
+    a, b = stats[entrant]["name"], stats[sortant]["name"]
+    ra, rb = role(a), role(b)
+    if "victoire" in (ra, rb):
+        return False
+    if {ra, rb} == {"troupe", "batiment"}:
+        return True
+    if ids is None:
+        return False
+    faiblesses = problemes_structure(ids, stats)
+    return any(k in faiblesses and a in CORRIGE[k] for k in CORRIGE)
+
+
+def penalite_remplacement(entrant, sortant, stats, ids=None):
     """Coût (en winrate) d'un remplacement, ou None s'il est interdit.
-    Interdits : changer de rôle général (carte de victoire, sort, bâtiment, troupe) ou plus de 2 points d'élixir au-delà de l'écart toléré
-    (1 point d'écart, 2 entre sorts). Le reste est permis avec un malus : une autre famille du même rôle, un écart d'élixir un peu plus grand."""
+    Un changement de rôle général (carte de victoire, sort, bâtiment, troupe) est interdit, sauf troupe <-> bâtiment ou carte qui comble
+    une faiblesse du deck (quand `ids`, le deck actuel, est donné) : il coûte alors PENALITE_ROLE. Plus de 2 points d'élixir au-delà de
+    l'écart toléré (1 point d'écart, 2 entre sorts) est interdit. Le reste est permis avec un malus : une autre famille du même rôle,
+    un écart d'élixir un peu plus grand."""
     if entrant not in stats or sortant not in stats:
         return None
     a, b = stats[entrant], stats[sortant]
+    pen = 0.0
     if role(a["name"]) != role(b["name"]):
-        return None
-    pen = 0.0 if roles_compatibles(a["name"], b["name"]) else PENALITE_FAMILLE
-    tolerance = 2 if role(a["name"]) == "sort" else 1
+        if not role_croise_permis(entrant, sortant, stats, ids):
+            return None
+        pen = PENALITE_ROLE
+    elif not roles_compatibles(a["name"], b["name"]):
+        pen = PENALITE_FAMILLE
+    tolerance = 2 if "sort" in (role(a["name"]), role(b["name"])) else 1
     exces = abs((a["elixir"] or 0) - (b["elixir"] or 0)) - tolerance
     if exces >= 3:
         return None
@@ -988,7 +1029,7 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
             if sortant not in stats:
                 continue
             for entrant in pool_g:
-                pen = penalite_remplacement(entrant, sortant, stats)
+                pen = penalite_remplacement(entrant, sortant, stats, glouton)
                 if pen is None:
                     continue
                 nouveau = glouton[:pos] + [entrant] + glouton[pos + 1:]
@@ -1014,7 +1055,7 @@ def ameliorer(ids, evo, stats, p0, profil, exclues=()):
             if sortant not in stats:
                 continue
             for entrant in pool:
-                pen = penalite_remplacement(entrant, sortant, stats)
+                pen = penalite_remplacement(entrant, sortant, stats, cartes)
                 if pen is not None:
                     simples.append((pos, sortant, entrant, pen))
         meilleure_paire = None
@@ -1094,7 +1135,7 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil, nb_modifiables=None):
                 for pos in range(8):
                     x = decks[k][pos]
                     for y in pool:
-                        pen = penalite_remplacement(y, x, stats)
+                        pen = penalite_remplacement(y, x, stats, decks[k])
                         if pen is None:
                             continue
                         avant_k = list(decks[k])
@@ -1124,7 +1165,7 @@ def optimiser_ensemble(decks_ids, evos, stats, p0, profil, nb_modifiables=None):
         simples = []
         for pos, x in enumerate(depart[k]):
             for y in pool0:
-                pen = penalite_remplacement(y, x, stats)
+                pen = penalite_remplacement(y, x, stats, depart[k])
                 if pen is not None:
                     simples.append((pos, y, pen + (EVO_PERTE if evos0[k][pos] else 0.0)))
         base_k = note_deck(depart[k], stats, p0, profil)
@@ -1227,12 +1268,12 @@ def defense_aerienne(ids, stats):
     return sum(1 for n in noms if n in ANTI_AIR)
 
 
-# Cartes qui servent à défendre contre les airs : à dégâts de zone (nuées, Ballon accompagné) ou à dégâts ciblés (gros air seul)
-ZONE_AIR = {"Arrows", "Fireball", "Lightning", "Poison", "Baby Dragon", "Wizard", "Witch", "Mother Witch", "Executioner",
-            "Minion Horde", "Electro Dragon", "Bats", "Skeleton Dragons", "Void"}
-CIBLE_AIR = {"Inferno Tower", "Inferno Dragon", "Tesla", "Musketeer", "Hunter", "Mega Minion", "Archers", "Firecracker", "Magic Archer",
-             "Electro Wizard", "Dart Goblin", "Three Musketeers", "Archer Queen", "Little Prince", "Phoenix", "Zappies", "Princess"}
+# Troupes qui défendent les airs mais meurent toutes à un petit sort (Flèches, Zap, Bûche) : une défense aérienne bâtie là-dessus est fragile
+FRAGILES_PETIT_SORT = {"Minion Horde", "Bats", "Skeleton Dragons", "Archers", "Dart Goblin", "Firecracker", "Magic Archer", "Princess",
+                       "Zappies", "Spear Goblins", "Goblin Gang", "Minions", "Phoenix"}
 TEXTE_PROBLEME = {
+    "air_fragile": "défense aérienne fragile : toutes tes réponses aux airs meurent au même petit sort (Flèches, Zap)",
+    "air_peu": "une seule troupe ou un seul bâtiment pour défendre les airs (le reste ne repose que sur des sorts)",
     "victoire": "aucune carte de victoire reconnue",
     "sorts0": "aucun sort",
     "sorts4": "plus de 3 sorts (peu de troupes pour défendre)",
@@ -1265,6 +1306,12 @@ def problemes_structure(ids, stats):
         res.add("air_zone")
     if not any(n in CIBLE_AIR for n in noms):
         res.add("air_cible")
+    repondants = [n for n in noms if (n in ZONE_AIR or n in CIBLE_AIR or n in ANTI_AIR) and role(n) in ("troupe", "batiment")]
+    fragile = bool(repondants) and all(n in FRAGILES_PETIT_SORT for n in repondants)
+    if fragile:
+        res.add("air_fragile")
+    elif len(repondants) == 1:
+        res.add("air_peu")
     return res
 
 
@@ -1575,14 +1622,58 @@ def assembler(sections, limite=4000):
     return "\n\n".join(garde)[:limite]
 
 
-def niveau_confiance(ids, stats, combats):
-    """Confiance dans l'estimation : faible / moyenne / élevée, selon le nombre de parties derrière chaque carte."""
+MIN_PARTIES_DECK_FIABLE = 30      # au moins 30 parties du deck complet pour que sa confiance soit « élevée »
+
+
+def stats_deck_complet(ids, mode):
+    """Ce que les meilleurs joueurs ont VRAIMENT obtenu avec ce deck de 8 cartes (pas une déduction à partir des cartes).
+    Renvoie None si le mode n'a pas ces données (guerre) ou si le deck n'a jamais été vu, sinon
+    {"g", "w", "bas", "haut", "type"} ; type = "exact" (même 8 cartes) ou "proche" (decks à une seule carte d'écart, regroupés)."""
+    if mode not in ("classe", "voie"):
+        return None
+    cle = ",".join(str(i) for i in sorted(ids))
+    moi = set(ids)
+    exact, proche = [0, 0], [0, 0]
+    for jour in charger_decks()["days"].values():
+        for k, (g, w) in (jour.get(mode) or {}).items():
+            if k == cle:
+                exact[0] += g
+                exact[1] += w
+            elif len(moi & {int(x) for x in k.split(",")}) >= 7:
+                proche[0] += g
+                proche[1] += w
+    if exact[0] >= MIN_PARTIES_DECK:
+        g, w, type_ = exact[0], exact[1], "exact"
+    elif exact[0] + proche[0] >= MIN_PARTIES_DECK:
+        g, w, type_ = exact[0] + proche[0], exact[1] + proche[1], "proche"
+    else:
+        return None
+    bas, haut = _wilson_bornes(g, w)
+    return {"g": g, "w": w, "bas": bas, "haut": haut, "type": type_}
+
+
+def niveau_confiance(ids, stats, combats, deck=None):
+    """Confiance dans l'estimation : faible / moyenne / élevée.
+    Les parties de chaque carte ne suffisent pas : le winrate de 8 cartes n'est pas celui du deck. « Élevée » demande donc aussi
+    d'avoir vu ce deck (ou ses variantes) au moins 30 fois chez les meilleurs joueurs, avec un intervalle de confiance assez étroit."""
     parties = [stats[i]["games"] if i in stats else 0 for i in ids]
-    if min(parties) >= 5 * MIN_PARTIES_CARTE and combats >= 3 * MIN_COMBATS_MODE:
+    if min(parties) < MIN_PARTIES_CARTE:
+        return "faible"
+    if (min(parties) >= 5 * MIN_PARTIES_CARTE and combats >= 3 * MIN_COMBATS_MODE and deck
+            and deck["g"] >= MIN_PARTIES_DECK_FIABLE and deck["haut"] - deck["bas"] <= 0.30):
         return "élevée"
-    if min(parties) >= MIN_PARTIES_CARTE:
-        return "moyenne"
-    return "faible"
+    return "moyenne"
+
+
+def ligne_confiance_deck(deck, mode):
+    """Une ligne qui dit ce qu'on sait du deck complet, avec son intervalle de confiance."""
+    if deck is None:
+        if mode in ("classe", "voie"):
+            return "deck complet jamais ou presque jamais vu chez les meilleurs joueurs : estimation faite à partir des cartes, sans intervalle de confiance"
+        return "pas de données sur les decks complets dans ce mode : estimation faite à partir des cartes, sans intervalle de confiance"
+    base = "ton deck exact" if deck["type"] == "exact" else "tes cartes à une carte près"
+    return (f"{base} chez les meilleurs : `{100 * deck['w'] / deck['g']:.1f}%` sur {deck['g']} parties "
+            f"(intervalle `{100 * deck['bas']:.0f}`–`{100 * deck['haut']:.0f}%`)")
 
 
 def construire_reponse(mode, decks, tag, devine):
@@ -1619,6 +1710,7 @@ def construire_reponse(mode, decks, tag, devine):
 
     absentes = [i for i in ids if profil and i not in profil]
     score = note_deck(ids, stats, p0, profil)
+    deck_complet = stats_deck_complet(ids, mode)
     el_avant = elixir_moyen(ids, stats, profil)
     evo_de = {i: slots[p] for p, i in enumerate(ids)}
     evo_ids = {i for i, v in evo_de.items() if v}          # tes évolutions : retirées seulement si le deck est nettement mieux sans
@@ -1639,14 +1731,15 @@ def construire_reponse(mode, decks, tag, devine):
         else:
             lignes.append(f"{nom_carte(i)}{' ✨' if evo[pos] else ''} — peu de données")
     sections = [f"**{etiquette(score, p0)}** · winrate estimé `≈{100 * score:.1f}%` "
-                f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode} · confiance {niveau_confiance(ids, stats, combats)}"
+                f"(moyenne du mode : `{100 * p0:.1f}%`)\n-# {combats} combats analysés · {nom_mode} · confiance {niveau_confiance(ids, stats, combats, deck_complet)}"
+                + f"\n-# {ligne_confiance_deck(deck_complet, mode)}"
                 + (f"\n-# {note_auto}" if note_auto else "")
                 + (f"\n-# ⚠️ Données anciennes : dernier combat enregistré il y a {age} jours." if (age := age_donnees(data)) is not None and age >= 2 and source == "stockees" else "")
                 + (" · données lues en direct" if source == "direct" else "")
                 + (f"\n-# Mode non précisé : j'ai pris « {nom_mode} ». Pour un autre mode, écris `gdc` ou `voie` avant le lien." if devine else ""),
                 "**🧩 Tes cartes** (winrate de chaque carte dans ce mode)\n" + "\n".join(lignes)]
     notes = points_attention(ids, stats, profil)
-    notes += [f"structure : {TEXTE_PROBLEME[k]}" for k in sorted(problemes_structure(ids, stats)) if k in ("victoire", "sorts0", "sorts4", "sol", "elixir", "air_zone", "air_cible")]
+    notes += [f"structure : {TEXTE_PROBLEME[k]}" for k in sorted(problemes_structure(ids, stats)) if k in TEXTE_PROBLEME]
     if absentes:
         notes.append("ne figure(nt) pas dans ton profil : " + ", ".join(nom_fr(stats[i]["name"]) if i in stats else f"carte {i}" for i in absentes))
     non_poss = formes_non_possedees(ids, slots, profil)
@@ -1688,8 +1781,6 @@ def construire_reponse(mode, decks, tag, devine):
             slots_p = [evo_de.get(i, 0) for i in proche["cartes"]]
             txt = (f"Le deck des meilleurs joueurs le plus proche du tien : `{100 * proche['w'] / proche['g']:.1f}%` de victoires "
                    f"sur {proche['g']} parties ({proche['communes']} cartes en commun)\n🔁 {', '.join(sortent)} → **{', '.join(entrent)}**")
-            if mon and mon[0] >= MIN_PARTIES_DECK:
-                txt += f"\nTon deck exact chez les meilleurs : `{100 * mon[1] / mon[0]:.1f}%` sur {mon[0]} parties"
             if proche["perdues"]:
                 txt += "\n⚠️ Retire ton évolution : " + ", ".join(nom_carte(i, False) for i in proche["perdues"])
             if proche["manquantes"]:
