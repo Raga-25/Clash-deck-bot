@@ -348,8 +348,8 @@ def pct(a, b):
 
 
 def vg(w, g):
-    """« 5 victoires sur 15 combats » : une fraction toujours écrite en toutes lettres."""
-    return f"{w} victoire{'s' if w > 1 else ''} sur {g} combat{'s' if g > 1 else ''}"
+    """« victoires : 5/15 » : victoires sur combats joués."""
+    return f"victoires : {w}/{g}"
 
 
 # ========================
@@ -786,7 +786,7 @@ def analyse_historique(tous):
         for e in frequents:
             arch = d.archetype([(x.get("name", "?"), x.get("elixirCost")) for x in e["cartes"]])
             nom_deck = d.nom_fr(arch) if arch != "Autre" else d.nom_fr(e["cartes"][0].get("name", "?")) + "…"
-            morceaux.append(f"{nom_deck} `{pct(e['w'], e['g'])}` sur {e['g']} combats")
+            morceaux.append(f"{nom_deck} `{pct(e['w'], e['g'])}` ({vg(e['w'], e['g'])})")
         lignes.append("🃏 Tes decks : " + " · ".join(morceaux))
     # cartes : meilleure et moins bonne (seulement si tu changes de deck assez pour comparer)
     par_carte = {}
@@ -805,9 +805,9 @@ def analyse_historique(tous):
         haut, bas = max(notes, key=lambda x: x[0]), min(notes, key=lambda x: x[0])
         morceaux = []
         if haut[0] >= Z_MIN and haut[1]["w"] / haut[1]["g"] - (vict - haut[1]["w"]) / (n - haut[1]["g"]) >= 0.10:
-            morceaux.append(f"✅ {d.nom_fr(haut[1]['nom'])} `{pct(haut[1]['w'], haut[1]['g'])}` sur {haut[1]['g']} combats")
+            morceaux.append(f"✅ {d.nom_fr(haut[1]['nom'])} `{pct(haut[1]['w'], haut[1]['g'])}` ({vg(haut[1]['w'], haut[1]['g'])})")
         if bas[0] <= -Z_MIN and (vict - bas[1]["w"]) / (n - bas[1]["g"]) - bas[1]["w"] / bas[1]["g"] >= 0.10:
-            morceaux.append(f"⚠️ {d.nom_fr(bas[1]['nom'])} `{pct(bas[1]['w'], bas[1]['g'])}` sur {bas[1]['g']} combats")
+            morceaux.append(f"⚠️ {d.nom_fr(bas[1]['nom'])} `{pct(bas[1]['w'], bas[1]['g'])}` ({vg(bas[1]['w'], bas[1]['g'])})")
         if morceaux:
             lignes.append("🎴 Quand tu les joues : " + " · ".join(morceaux))
     # matchups par type de deck adverse
@@ -829,7 +829,7 @@ def analyse_historique(tous):
                 marque = "✅ "
             elif z <= -Z_MIN and w / g <= autres_w / autres_g - 0.12:
                 marque = "⚠️ "
-        morceaux.append(f"{marque}{NOM_PLAN[plan]} : {vg(w, g)}")
+        morceaux.append(f"{marque}{NOM_PLAN[plan]} ({vg(w, g)})")
     if morceaux:
         lignes.append("⚔️ Matchups (contre quel type de deck adverse) : " + " · ".join(morceaux))
     # résultats selon l'élixir moyen de ton deck
@@ -934,7 +934,7 @@ def construire(tag):
     if b["trophees"]:
         lignes.append("🏆 Trophées sur la période : " + " · ".join(f"{noms_modes[m]} `{val:+d}`" for m, val in b["trophees"].items()))
     noms_modes = {"classe": "Classé", "voie": "Voie des trophées", "gdc": "Guerre", "autre": "Autres"}
-    detail = " · ".join(f"{noms_modes.get(m, m)} {vg(w, g)}" for m, (g, w) in sorted(b["par_mode"].items(), key=lambda x: -x[1][0]))
+    detail = " · ".join(f"{noms_modes.get(m, m)} ({vg(w, g)})" for m, (g, w) in sorted(b["par_mode"].items(), key=lambda x: -x[1][0]))
     lignes.append(f"-# Par mode : {detail}")
     sections1 = ["**📊 Bilan**\n" + "\n".join(lignes)]
 
@@ -993,7 +993,7 @@ def construire(tag):
         else:
             g = en["groupes"]
             noms_g = {"sous": "en dessous de l'adversaire", "egal": "à niveau égal", "sur": "au-dessus de l'adversaire"}
-            lg = [f"• {noms_g[k]} : {vg(x[1], x[0])} (`{pct(x[1], x[0])}`)" for k, x in g.items() if x[0] >= 2]
+            lg = [f"• {noms_g[k]} — {vg(x[1], x[0])} (`{pct(x[1], x[0])}`)" for k, x in g.items() if x[0] >= 2]
             txt = f"Écart moyen avec tes adversaires : `{en['moy']:+.1f}` niveau\n" + "\n".join(lg)
             sous, egal_sur = g["sous"], [g["egal"][0] + g["sur"][0], g["egal"][1] + g["sur"][1]]
             if sous[0] >= 4 and egal_sur[0] >= 4:
@@ -1028,11 +1028,11 @@ def construire(tag):
         for plan, g, w in mauvais[:2]:
             statut, det = lecture_plan_par_deck(par_deck, plan)
             cartes_conseil = cartes_deck
-            ligne = f"• Contre les **{NOM_PLAN[plan]}** : {vg(w, g)} (`{pct(w, g)}`){tendance(z_plans.get(plan, 0))}"
+            ligne = f"• Contre les **{NOM_PLAN[plan]}** — {vg(w, g)} (`{pct(w, g)}`){tendance(z_plans.get(plan, 0))}"
             if statut == "un_deck":
                 z_u, cle_u, g_u, w_u, ag, aw = det
-                ligne += (f"\n   ↳ C'est surtout **ton deck {noms_d[cle_u]}** : {vg(w_u, g_u)} (`{pct(w_u, g_u)}`), "
-                          f"alors qu'avec tes autres decks : {vg(aw, ag)} (`{pct(aw, ag)}`)")
+                ligne += (f"\n   ↳ C'est surtout **ton deck {noms_d[cle_u]}** — {vg(w_u, g_u)} (`{pct(w_u, g_u)}`), "
+                          f"alors qu'avec tes autres decks — {vg(aw, ag)} (`{pct(aw, ag)}`)")
                 cartes_conseil = par_deck[cle_u]["cartes"]
             elif statut == "tous":
                 ligne += "\n   ↳ Quel que soit le deck que tu joues : le problème n'est pas une carte en particulier"
@@ -1045,19 +1045,19 @@ def construire(tag):
                          max(0.0, base_autres - w / g) * g / termines_tous, g, solide=z_plans.get(plan, 0) >= Z_MIN)
         for cle_u, plan, g_u, w_u, z_u in propres:
             ag, aw = par_deck[cle_u]["n"] - g_u, par_deck[cle_u]["v"] - w_u
-            txt.append(f"• Avec **ton deck {noms_d[cle_u]}** seulement : contre les **{NOM_PLAN[plan]}**, {vg(w_u, g_u)} (`{pct(w_u, g_u)}`) "
-                       f"contre {vg(aw, ag)} (`{pct(aw, ag)}`) face aux autres types")
+            txt.append(f"• Avec **ton deck {noms_d[cle_u]}** seulement : contre les **{NOM_PLAN[plan]}** — {vg(w_u, g_u)} (`{pct(w_u, g_u)}`), "
+                       f"alors que face aux autres types — {vg(aw, ag)} (`{pct(aw, ag)}`)")
             prio.ajouter("plan-deck-" + plan, f"**{NOM_PLAN[plan].capitalize()}, avec {noms_d[cle_u]}** : {conseil_plan(plan, par_deck[cle_u]['cartes'])}",
                          max(0.0, aw / ag - w_u / g_u) * g_u / termines_tous, g_u, solide=True)
         if noires:
             txt.append("• Cartes qui reviennent dans tes défaites : "
-                       + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu {e['d']} fois sur {e['g']} combats où elle apparaît)" for e in noires))
+                       + ", ".join(f"**{d.nom_fr(e['nom'])}** (perdu : {e['d']}/{e['g']})" for e in noires))
         sections2.append("**🎯 Tes bêtes noires**\n" + "\n".join(txt))
     else:
         sections2.append("**🎯 Tes bêtes noires**\n" + v("Aucun type de deck ne te bat de façon répétée sur cet échantillon. 👍", "Pas de deck qui te pose problème de façon répétée ici. 👍", "Rien de récurrent dans tes défaites sur cet échantillon. 👍"))
     va = vitesse_adverse(tous)
     if len(va) >= 2:
-        txt = "\n".join(f"• Decks {k} : {vg(w, g)} (`{pct(w, g)}`)" for k, (g, w) in va.items())
+        txt = "\n".join(f"• Decks {k} — {vg(w, g)} (`{pct(w, g)}`)" for k, (g, w) in va.items())
         pire = vitesse_pire(va)
         if pire:
             nom_v, g_v, w_v, z_v = pire
@@ -1110,7 +1110,7 @@ def construire(tag):
         txt.append("-# Horaires : pas assez de combats par créneau (il en faut 8) pour conclure.")
     if txt:
         sections2.append("**🧠 Mental, fatigue et horaires**\n" + "\n".join(txt))
-    sections2.append("-# Lecture indicative : ce sont des écarts constatés sur tes combats récents (« 5 victoires sur 15 combats » = sur 15 combats concernés, 5 gagnés), pas des certitudes. "
+    sections2.append("-# Lecture indicative : ce sont des écarts constatés sur tes combats récents (« victoires : 5/15 » = 5 combats gagnés sur 15 joués ; « perdu : 4/5 » = 4 combats perdus sur 5), pas des certitudes. "
                      "Seuls les écarts nets (au-delà du hasard) entrent dans le plan d'action.")
     embeds.append({"title": "🔬 Comment tu joues", "color": 15105570, "description": d.assembler(sections2)})
 
