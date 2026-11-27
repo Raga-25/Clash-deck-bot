@@ -490,6 +490,85 @@ def betes_noires_propres_a_un_deck(decks, deja):
     return res[:2]
 
 
+MIN_DEPUIS = 8                    # combats joués depuis la dernière analyse avant de comparer
+
+
+def cle_temps(c):
+    return c["t"].strftime("%Y%m%dT%H%M%S")
+
+
+def instantane(tous, mauvais):
+    """Photo de l'analyse, gardée dans l'historique pour comparer à la prochaine demande."""
+    termines = [c for c in tous if c["win"] or c["loss"]][-25:]
+    fuites = [c["fuite"] for c in termines if c["fuite"] is not None]
+    return {"t": d.maintenant_utc().isoformat(), "tmax": cle_temps(tous[-1]), "n": len(termines),
+            "v": sum(c["win"] for c in termines), "fuite": round(sum(fuites) / len(fuites), 2) if len(fuites) >= 5 else None,
+            "plans": [[p, g, w] for p, g, w in mauvais[:2]]}
+
+
+def depuis_quand(iso):
+    try:
+        delta = d.maintenant_utc() - datetime.datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return "un moment"
+    heures = int(delta.total_seconds() // 3600)
+    if heures < 1:
+        return "moins d'une heure"
+    if heures < 48:
+        return f"{heures} h"
+    return f"{heures // 24} jours"
+
+
+def evolution(tous, ancienne):
+    """Compare les combats joués depuis la dernière analyse à ce qu'elle avait mesuré.
+    Renvoie (statut, lignes) : statut « ok » (assez de combats pour comparer), « peu » ou None (première analyse)."""
+    if not ancienne or not ancienne.get("tmax"):
+        return None, []
+    nouveaux = [c for c in tous if cle_temps(c) > ancienne["tmax"] and (c["win"] or c["loss"])]
+    quand = depuis_quand(ancienne.get("t"))
+    if len(nouveaux) < MIN_DEPUIS:
+        return "peu", [f"-# Depuis ta dernière analyse (il y a {quand}) tu as joué {len(nouveaux)} combat{'s' if len(nouveaux) > 1 else ''} : "
+                       f"il m'en faut au moins {MIN_DEPUIS} pour comparer. Reviens après quelques parties."]
+    g, w = len(nouveaux), sum(c["win"] for c in nouveaux)
+    lignes = []
+    go, wo = ancienne.get("n", 0), ancienne.get("v", 0)
+    ligne = f"{g} combats joués : `{pct(w, g)}` de victoires ({vg(w, g)})"
+    if go >= MIN_DEPUIS:
+        z = z_ecart(g, w, go, wo)
+        diff = w / g - wo / go
+        ligne += f" · avant : `{pct(wo, go)}` sur tes {go} combats précédents"
+        if diff >= 0.08 and z >= Z_TENDANCE:
+            ligne += " · ↗️ en progression" + tendance(z)
+        elif diff <= -0.08 and -z >= Z_TENDANCE:
+            ligne += " · ↘️ en baisse" + tendance(z)
+        else:
+            ligne += " · ≈ stable (écart dans la marge du hasard)"
+    lignes.append(ligne)
+    gains = {}
+    for c in nouveaux:
+        if c["trophees"] is not None and c["mode"] in ("classe", "voie"):
+            gains[c["mode"]] = gains.get(c["mode"], 0) + c["trophees"]
+    noms = {"classe": "Classé", "voie": "Voie des trophées"}
+    if gains:
+        lignes.append("🏆 Trophées depuis : " + " · ".join(f"{noms[m]} `{val:+d}`" for m, val in gains.items()))
+    fuites = [c["fuite"] for c in nouveaux if c["fuite"] is not None]
+    if ancienne.get("fuite") is not None and len(fuites) >= MIN_DEPUIS:
+        nv = sum(fuites) / len(fuites)
+        sens = " · ✅ mieux" if nv <= ancienne["fuite"] - 0.3 else (" · ⚠️ pire" if nv >= ancienne["fuite"] + 0.3 else " · ≈ stable")
+        lignes.append(f"⚡ Élixir perdu : `{nv:.1f}` par combat (avant `{ancienne['fuite']:.1f}`){sens}")
+    for plan, g0, w0 in (ancienne.get("plans") or []):
+        if plan not in NOM_PLAN:
+            continue
+        sel = [c for c in nouveaux if plan_adverse(c["adv"])[1] == plan]
+        g2, w2 = len(sel), sum(c["win"] for c in sel)
+        if g2 >= 3:
+            lignes.append(f"🎯 Contre les **{NOM_PLAN[plan]}** (ton point faible) : avant {vg(w0, g0)} (`{pct(w0, g0)}`), "
+                          f"depuis {vg(w2, g2)} (`{pct(w2, g2)}`)" + (" · petit échantillon" if g2 < 5 else ""))
+        else:
+            lignes.append(f"🎯 Contre les **{NOM_PLAN[plan]}** (ton point faible) : seulement {g2} combat{'s' if g2 > 1 else ''} depuis, trop peu pour juger")
+    return "ok", lignes
+
+
 def elixir(combats):
     vic = [c["fuite"] for c in combats if c["fuite"] is not None and c["win"]]
     per = [c["fuite"] for c in combats if c["fuite"] is not None and c["loss"]]
@@ -937,6 +1016,15 @@ def construire(tag):
     detail = " · ".join(f"{noms_modes.get(m, m)} ({vg(w, g)})" for m, (g, w) in sorted(b["par_mode"].items(), key=lambda x: -x[1][0]))
     lignes.append(f"-# Par mode : {detail}")
     sections1 = ["**📊 Bilan**\n" + "\n".join(lignes)]
+    try:
+        ancienne = charger_histo(tag).get("derniere")
+        statut_evo, lignes_evo = evolution(tous, ancienne)
+    except Exception as e:                                           # la comparaison ne doit jamais bloquer le reste
+        print(f"[Coach] comparaison impossible : {e}", file=sys.stderr)
+        ancienne, statut_evo, lignes_evo = None, None, []
+    if lignes_evo:
+        sections1.append(("**🔁 Depuis ta dernière analyse** (il y a " + depuis_quand(ancienne.get("t")) + ")\n" + "\n".join(lignes_evo))
+                         if statut_evo == "ok" else "\n".join(lignes_evo))
 
     fo = forme(profil_brut, b)
     if fo:
@@ -975,6 +1063,13 @@ def construire(tag):
     embed1 = {"title": f"🧠 Coach de {nom}", "color": 15105570, "description": d.assembler(sections1),
               "footer": {"text": f"Bilan sur tes {b['n']} derniers combats{memoire} · indicatif, pas une vérité absolue"}}
     embeds = [embed1]
+    if statut_evo != "peu":                                          # on garde l'ancienne photo tant qu'il n'y a pas assez de combats pour comparer
+        try:
+            data_h = charger_histo(tag)
+            data_h["derniere"] = instantane(tous, mauvais)
+            sauver_histo(tag, data_h)
+        except Exception as e:
+            print(f"[Coach] photo de l'analyse non enregistrée : {e}", file=sys.stderr)
 
     # ===== Deck principal (lu avant l'analyse : les conseils s'y adaptent) =====
     modes_jeu = [m for m in ("classe", "voie") if b["par_mode"].get(m)]
